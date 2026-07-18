@@ -3779,6 +3779,32 @@ def _filter_tariffs_by_switch_direction(
     return filtered
 
 
+def _format_switch_period_label(days: int) -> str:
+    """Человекочитаемый период для строки цены: день, 14 дней, месяц, год..."""
+    named = {1: 'день', 7: 'неделю', 30: 'месяц', 60: '2 месяца', 90: '3 месяца', 180: 'полгода', 365: 'год'}
+    if days in named:
+        return named[days]
+    return format_period(days)
+
+
+def _get_tariff_min_price_kopeks(tariff: Tariff) -> tuple[int, str] | None:
+    """Возвращает минимальную цену тарифа в копейках и период, которому она соответствует."""
+    candidates = []
+
+    for period_days, price in (tariff.period_prices or {}).items():
+        if price is not None:
+            candidates.append((price, _format_switch_period_label(int(period_days))))
+
+    if tariff.is_daily and tariff.daily_price_kopeks:
+        candidates.append((tariff.daily_price_kopeks, 'день'))
+
+    if tariff.custom_days_enabled and tariff.price_per_day_kopeks:
+        min_days = max(tariff.min_days, 1)
+        candidates.append((tariff.price_per_day_kopeks * min_days, _format_switch_period_label(min_days)))
+
+    return min(candidates, key=lambda c: c[0]) if candidates else None
+
+
 def format_instant_switch_list_text(
     tariffs: list[Tariff],
     current_tariff: Tariff,
@@ -3802,22 +3828,22 @@ def format_instant_switch_list_text(
         lines.append('⬇️ Понижение = бесплатно')
     lines.append('')
 
-    for tariff in tariffs:
-        if tariff.id == current_tariff.id:
-            continue
+    # Показываем все тарифы, включая текущий (в список tariffs он не входит —
+    # его отфильтровывают до вызова, поэтому добавляем обратно)
+    display_tariffs = list(tariffs)
+    if all(t.id != current_tariff.id for t in display_tariffs):
+        display_tariffs.append(current_tariff)
+    display_tariffs.sort(key=lambda t: (t.display_order, t.id))
 
-        traffic_gb = tariff.traffic_limit_gb
-        traffic = '∞' if traffic_gb == 0 else f'{traffic_gb} ГБ'
-
-        # Рассчитываем стоимость переключения
-        cost, is_upgrade = _calculate_instant_switch_cost(current_tariff, tariff, remaining_days, db_user)
-
-        if is_upgrade:
-            cost_text = f'⬆️ +{format_price_kopeks(cost, compact=True)}'
+    for tariff in display_tariffs:
+        min_price = _get_tariff_min_price_kopeks(tariff)
+        if min_price is not None:
+            price_kopeks, period_label = min_price
+            price_text = f' — от {format_price_kopeks(price_kopeks, compact=True)} / в {period_label}'
         else:
-            cost_text = '⬇️ Бесплатно'
+            price_text = ''
 
-        lines.append(f'<b>{html.escape(tariff.name)}</b> — {traffic} / {tariff.device_limit} 📱 {cost_text}')
+        lines.append(f'<b>{html.escape(tariff.name)}</b>{price_text}')
 
         if tariff.description:
             lines.append(f'<i>{html.escape(tariff.description)}</i>')
