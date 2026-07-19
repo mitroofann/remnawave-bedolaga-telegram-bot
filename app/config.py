@@ -260,6 +260,8 @@ class Settings(BaseSettings):
     TRAFFIC_SELECTION_MODE: str = 'selectable'
     FIXED_TRAFFIC_LIMIT_GB: int = 100
     BUY_TRAFFIC_BUTTON_VISIBLE: bool = True
+    # Кнопка «Промокод» в главном меню (сам раздел /промокоды не отключает)
+    PROMOCODE_BUTTON_VISIBLE: bool = False
 
     # Режим продаж подписок:
     # - classic: классический режим (выбор серверов, трафика, устройств, периода отдельно)

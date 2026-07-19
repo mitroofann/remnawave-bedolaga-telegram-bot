@@ -615,6 +615,8 @@ def get_main_menu_keyboard(
 
     keyboard: list[list[InlineKeyboardButton]] = []
     paired_buttons: list[InlineKeyboardButton] = []
+    # Кнопка «Подписка» встаёт в один ряд с балансом (заполняется ниже при активной подписке)
+    subscription_menu_button: InlineKeyboardButton | None = None
 
     if has_active_subscription and subscription_is_active:
         connect_mode = settings.CONNECT_BUTTON_MODE
@@ -681,7 +683,7 @@ def get_main_menu_keyboard(
             if settings.is_multi_tariff_enabled()
             else texts.MENU_SUBSCRIPTION
         )
-        paired_buttons.append(InlineKeyboardButton(text=sub_btn_text, callback_data='menu_subscription'))
+        subscription_menu_button = InlineKeyboardButton(text=sub_btn_text, callback_data='menu_subscription')
 
         # Добавляем кнопку докупки трафика для лимитированных подписок
         # В режиме тарифов проверяем tariff_id (детальная проверка в хендлере)
@@ -702,7 +704,10 @@ def get_main_menu_keyboard(
                 )
             )
 
-    keyboard.append([InlineKeyboardButton(text=balance_button_text, callback_data='menu_balance')])
+    balance_row = [InlineKeyboardButton(text=balance_button_text, callback_data='menu_balance')]
+    if subscription_menu_button:
+        balance_row.append(subscription_menu_button)
+    keyboard.append(balance_row)
 
     show_trial = (
         not has_had_paid_subscription
@@ -753,11 +758,15 @@ def get_main_menu_keyboard(
                 paired_buttons.append(button)
 
     # Добавляем кнопки промокода и рефералов, учитывая настройки
-    paired_buttons.append(InlineKeyboardButton(text=texts.MENU_PROMOCODE, callback_data='menu_promocode'))
+    if settings.PROMOCODE_BUTTON_VISIBLE:
+        paired_buttons.append(InlineKeyboardButton(text=texts.MENU_PROMOCODE, callback_data='menu_promocode'))
+
+    # Рефералы, техподдержка и инфо идут одним нижним рядом из трёх кнопок
+    bottom_row: list[InlineKeyboardButton] = []
 
     # Добавляем кнопку рефералов, только если программа включена
     if settings.is_referral_program_enabled():
-        paired_buttons.append(InlineKeyboardButton(text=texts.MENU_REFERRALS, callback_data='menu_referrals'))
+        bottom_row.append(InlineKeyboardButton(text=texts.MENU_REFERRALS, callback_data='menu_referrals'))
 
     # Добавляем кнопку конкурсов
     if settings.CONTESTS_ENABLED and settings.CONTESTS_BUTTON_VISIBLE:
@@ -773,13 +782,13 @@ def get_main_menu_keyboard(
         support_enabled = settings.SUPPORT_MENU_ENABLED
 
     if support_enabled:
-        paired_buttons.append(InlineKeyboardButton(text=texts.MENU_SUPPORT, callback_data='menu_support'))
+        bottom_row.append(InlineKeyboardButton(text=texts.MENU_SUPPORT, callback_data='menu_support'))
 
     # Добавляем кнопку активации
     if settings.ACTIVATE_BUTTON_VISIBLE:
         paired_buttons.append(InlineKeyboardButton(text=settings.ACTIVATE_BUTTON_TEXT, callback_data='activate_button'))
 
-    paired_buttons.append(
+    bottom_row.append(
         InlineKeyboardButton(
             text=texts.t('MENU_INFO', 'ℹ️ Инфо'),
             callback_data='menu_info',
@@ -792,6 +801,8 @@ def get_main_menu_keyboard(
     for i in range(0, len(paired_buttons), 2):
         row = paired_buttons[i : i + 2]
         keyboard.append(row)
+
+    keyboard.append(bottom_row)
 
     if settings.DEBUG:
         logger.debug('DEBUG KEYBOARD: админ кнопка', is_admin=is_admin)
