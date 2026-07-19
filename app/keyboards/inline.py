@@ -1265,19 +1265,35 @@ def get_subscription_keyboard(
                         )
                     )
                 else:
-                    # Для суточных тарифов переходим на список тарифов, для обычных - мгновенное переключение.
+                    # Кнопка «Тариф» открывает раздел подписки в miniapp-кабинете
+                    # в любом MAIN_MENU_MODE: web_app по MINIAPP_CUSTOM_URL, иначе
+                    # t.me-диплинк Mini App (MINIAPP_APP_SHORT_NAME). Без того и
+                    # другого — прежнее поведение: список тарифов / instant switch.
                     # Бесплатный (0₽) тариф — тоже через список с выбором периода: prorated
                     # instant-switch посчитал бы доплату за весь остаток бесплатных дней
                     # и перенёс бы их на платный тариф вопреки TARIFF_SWITCH_RESET_FREE_DAYS.
-                    is_free_tariff = bool(
-                        tariff and getattr(tariff, 'is_free', False) and settings.TARIFF_SWITCH_RESET_FREE_DAYS
-                    )
-                    tariff_callback = 'tariff_switch' if (is_daily_tariff or is_free_tariff) else 'instant_switch'
-                    settings_row.append(
-                        InlineKeyboardButton(
-                            text=texts.t('CHANGE_TARIFF_BUTTON', '📦 Тариф'), callback_data=tariff_callback
+                    from app.utils.miniapp_buttons import build_cabinet_url, build_miniapp_startapp_url
+
+                    tariff_button_text = texts.t('CHANGE_TARIFF_BUTTON', '📦 Тариф')
+                    cabinet_subscription_url = build_cabinet_url('/subscription')
+                    miniapp_deeplink = build_miniapp_startapp_url('subscriptions')
+                    if cabinet_subscription_url:
+                        settings_row.append(
+                            InlineKeyboardButton(
+                                text=tariff_button_text,
+                                web_app=types.WebAppInfo(url=cabinet_subscription_url),
+                            )
                         )
-                    )
+                    elif miniapp_deeplink:
+                        settings_row.append(InlineKeyboardButton(text=tariff_button_text, url=miniapp_deeplink))
+                    else:
+                        is_free_tariff = bool(
+                            tariff and getattr(tariff, 'is_free', False) and settings.TARIFF_SWITCH_RESET_FREE_DAYS
+                        )
+                        tariff_callback = 'tariff_switch' if (is_daily_tariff or is_free_tariff) else 'instant_switch'
+                        settings_row.append(
+                            InlineKeyboardButton(text=tariff_button_text, callback_data=tariff_callback)
+                        )
             keyboard.append(settings_row)
 
             # Кнопка докупки трафика для платных подписок
