@@ -100,15 +100,12 @@ async def test_builder_single_subscription_structure(monkeypatch):
     # Имя экранировано, сырых тегов пользователя нет
     assert 'Егор &lt;script&gt;' in html_out
     assert '<script>' not in html_out
-    # Структура: заголовок, блок подписки, баланс, футер
+    # Структура: заголовок, блок подписки (без цитаты), баланс, футер
     assert html_out.startswith('<h4>')
-    assert '<blockquote>' in html_out
+    assert '<blockquote>' not in html_out
     assert '<footer>' in html_out
-    # Дата окончания — через tg-time с relative-форматом и unix конца подписки
-    assert f'unix="{int(subscription.end_date.timestamp())}"' in html_out
-    assert 'format="r"' in html_out
-    # Прогресс-бар остатка дней
-    assert '<code>[' in html_out
+    # Статус и дата окончания — из _get_subscription_status (💎 Активна\n📅 до …)
+    assert '💎 Активна' in html_out
     # Баланс из format_price
     assert '1250' in html_out
 
@@ -609,7 +606,14 @@ async def test_usage_traffic_and_devices_displayed(monkeypatch):
     html_out = await rich_menu.build_main_menu_rich_html(user, DummyTexts(), AsyncMock())
 
     assert '📊 Трафик: 12.5 ГБ / 100 ГБ' in html_out
+    assert '📊 Трафик на зарубежные локации: Безлимитный' in html_out
     assert '📱 Устройства: 3' in html_out
+    # Порядок строк: трафик → зарубежный трафик → устройства
+    assert (
+        html_out.index('📊 Трафик: ')
+        < html_out.index('📊 Трафик на зарубежные локации')
+        < html_out.index('📱 Устройства: 3')
+    )
 
 
 async def test_usage_row_in_multi_tariff_table(monkeypatch):

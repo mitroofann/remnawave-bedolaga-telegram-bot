@@ -1123,7 +1123,7 @@
   "MAIN_MENU_RICH_CONNECT": "⚡ Подключить",
   "MAIN_MENU_RICH_DAYS_LEFT": "осталось {days} дн.",
   "MAIN_MENU_RICH_DEVICES": "📱 Устройства: {devices}",
-  "MAIN_MENU_RICH_EXPIRES_RELATIVE": "⏳ истекает {when}",
+  "MAIN_MENU_RICH_FOREIGN_TRAFFIC": "📊 Трафик на зарубежные локации: Безлимитный",
   "MAIN_MENU_RICH_HINTS_SUMMARY": "💡 Акции и подсказки",
   "MAIN_MENU_RICH_RENEW": "🔄 Продлить",
   "MAIN_MENU_RICH_STATUS_ACTIVE": "🟢 Активна",

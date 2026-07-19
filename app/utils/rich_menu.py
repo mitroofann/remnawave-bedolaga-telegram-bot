@@ -54,7 +54,6 @@ from app.utils.timezone import format_local_datetime
 logger = structlog.get_logger(__name__)
 
 _RTL_LANGUAGES = frozenset({'ar', 'fa', 'he'})
-_PROGRESS_BAR_LENGTH = 10
 
 # Сервер не поддерживает rich-сообщения (устаревший self-hosted bot-api).
 # Взводится один раз до рестарта — по образцу _happ_encrypt_unavailable.
@@ -167,18 +166,6 @@ def _looks_like_unsupported(error: Exception) -> bool:
 
 def _tg_time(moment: datetime, time_format: str, fallback: str) -> str:
     return f'<tg-time unix="{int(moment.timestamp())}" format="{time_format}">{html.escape(fallback)}</tg-time>'
-
-
-def _progress_bar(seconds_left: float, total_seconds: float) -> str:
-    # Тот же вид [████░░░░░░], что у таймеров промо-предложений (app/utils/promo_offer.py).
-    if total_seconds <= 0:
-        total_seconds = seconds_left or 1
-    ratio = max(0.0, min(1.0, seconds_left / total_seconds))
-    filled = int(round(ratio * _PROGRESS_BAR_LENGTH))
-    filled = max(0, min(_PROGRESS_BAR_LENGTH, filled))
-    if filled == 0 and seconds_left > 0:
-        filled = 1
-    return f'[{"█" * filled}{"░" * (_PROGRESS_BAR_LENGTH - filled)}]'
 
 
 def _rich_status_label(texts, actual_status: str, is_trial: bool) -> str:
@@ -363,26 +350,17 @@ async def _build_single_subscription_block(user: User, texts, db: AsyncSession) 
     status_text = _get_subscription_status(user, texts, is_daily_tariff)
     lines = [html.escape(line) for line in status_text.split('\n') if line.strip()]
     if tariff_line:
-        lines.append(tariff_line)
+        # Тариф — сразу после строки статуса, до даты окончания
+        lines.insert(1, tariff_line)
 
-    current_time = datetime.now(UTC)
-    end_date = getattr(subscription, 'end_date', None)
-    start_date = getattr(subscription, 'start_date', None)
     actual_status = (subscription.actual_status or '').lower()
-    if not is_daily_tariff and end_date and end_date > current_time and actual_status in {'active', 'trial'}:
-        seconds_left = (end_date - current_time).total_seconds()
-        total_seconds = (end_date - start_date).total_seconds() if start_date else 0
-        relative_template = texts.t('MAIN_MENU_RICH_EXPIRES_RELATIVE', '⏳ истекает {when}')
-        days_left_text = texts.t('MAIN_MENU_RICH_DAYS_LEFT', 'осталось {days} дн.').replace(
-            '{days}', str(max((end_date - current_time).days, 0))
-        )
-        relative_line = html.escape(relative_template).replace('{when}', _tg_time(end_date, 'r', days_left_text))
-        lines.append(f'<code>{_progress_bar(seconds_left, total_seconds)}</code> {relative_line}')
-
     if actual_status in {'active', 'trial', 'limited'}:
         traffic_template = texts.t('MAIN_MENU_RICH_TRAFFIC', '📊 Трафик: {traffic}')
         lines.append(
             html.escape(traffic_template).replace('{traffic}', html.escape(_traffic_usage_text(subscription, texts)))
+        )
+        lines.append(
+            html.escape(texts.t('MAIN_MENU_RICH_FOREIGN_TRAFFIC', '📊 Трафик на зарубежные локации: Безлимитный'))
         )
         device_limit = getattr(subscription, 'device_limit', None)
         if device_limit:
@@ -397,7 +375,7 @@ async def _build_single_subscription_block(user: User, texts, db: AsyncSession) 
         if renew_link:
             lines.append(renew_link)
 
-    return '<blockquote>' + '<br>'.join(lines) + '</blockquote>'
+    return '<p>' + '<br>'.join(lines) + '</p>'
 
 
 async def build_main_menu_rich_html(user: User, texts, db: AsyncSession) -> str:
