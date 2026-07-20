@@ -1277,7 +1277,7 @@ def get_subscription_keyboard(
 
                     tariff_button_text = texts.t('CHANGE_TARIFF_BUTTON', '📦 Тариф')
                     cabinet_subscription_url = build_cabinet_url('/subscription/purchase')
-                    miniapp_deeplink = build_miniapp_startapp_url('subscriptions')
+                    miniapp_deeplink = build_miniapp_startapp_url('purchase')
                     if cabinet_subscription_url:
                         settings_row.append(
                             InlineKeyboardButton(
