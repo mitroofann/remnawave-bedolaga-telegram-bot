@@ -1265,8 +1265,9 @@ def get_subscription_keyboard(
                         )
                     )
                 else:
-                    # Кнопка «Тариф» открывает раздел подписки в miniapp-кабинете
-                    # в любом MAIN_MENU_MODE: web_app по MINIAPP_CUSTOM_URL, иначе
+                    # Кнопка «Тариф» открывает страницу покупки/смены тарифа в
+                    # miniapp-кабинете в любом MAIN_MENU_MODE: web_app по
+                    # MINIAPP_CUSTOM_URL (/subscription/purchase), иначе
                     # t.me-диплинк Mini App (MINIAPP_APP_SHORT_NAME). Без того и
                     # другого — прежнее поведение: список тарифов / instant switch.
                     # Бесплатный (0₽) тариф — тоже через список с выбором периода: prorated
@@ -1275,7 +1276,7 @@ def get_subscription_keyboard(
                     from app.utils.miniapp_buttons import build_cabinet_url, build_miniapp_startapp_url
 
                     tariff_button_text = texts.t('CHANGE_TARIFF_BUTTON', '📦 Тариф')
-                    cabinet_subscription_url = build_cabinet_url('/subscription')
+                    cabinet_subscription_url = build_cabinet_url('/subscription/purchase')
                     miniapp_deeplink = build_miniapp_startapp_url('subscriptions')
                     if cabinet_subscription_url:
                         settings_row.append(
