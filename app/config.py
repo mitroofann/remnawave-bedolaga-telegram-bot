@@ -20,6 +20,63 @@ DEFAULT_DISPLAY_NAME_BANNED_KEYWORDS: list[str] = [
 
 USER_TAG_PATTERN = re.compile(r'^[A-Z0-9_]{1,16}$')
 
+# Транслитерация кириллицы для идентификаторов RemnaWave: панель принимает только
+# [A-Za-z0-9_-], поэтому без неё кириллические имена выпадают из username целиком.
+_CYRILLIC_TO_LATIN: dict[str, str] = {
+    'а': 'a',
+    'б': 'b',
+    'в': 'v',
+    'г': 'g',
+    'д': 'd',
+    'е': 'e',
+    'ё': 'e',
+    'ж': 'zh',
+    'з': 'z',
+    'и': 'i',
+    'й': 'y',
+    'к': 'k',
+    'л': 'l',
+    'м': 'm',
+    'н': 'n',
+    'о': 'o',
+    'п': 'p',
+    'р': 'r',
+    'с': 's',
+    'т': 't',
+    'у': 'u',
+    'ф': 'f',
+    'х': 'kh',
+    'ц': 'ts',
+    'ч': 'ch',
+    'ш': 'sh',
+    'щ': 'shch',
+    'ъ': '',
+    'ы': 'y',
+    'ь': '',
+    'э': 'e',
+    'ю': 'yu',
+    'я': 'ya',
+    'є': 'ie',
+    'і': 'i',
+    'ї': 'i',
+    'ґ': 'g',
+    'ў': 'u',
+}
+
+
+def transliterate_cyrillic(value: str) -> str:
+    """Заменяет кириллические буквы латинскими, сохраняя регистр («Шмель» → «Shmel»)."""
+    result: list[str] = []
+    for char in value:
+        mapped = _CYRILLIC_TO_LATIN.get(char.lower())
+        if mapped is None:
+            result.append(char)
+        elif char.isupper():
+            result.append(mapped.capitalize())
+        else:
+            result.append(mapped)
+    return ''.join(result)
+
 
 logger = structlog.get_logger(__name__)
 
@@ -37,11 +94,13 @@ class Settings(BaseSettings):
     SUPPORT_USERNAME: str = '@support'
     SUPPORT_MENU_ENABLED: bool = True
     SUPPORT_SYSTEM_MODE: str = 'both'  # one of: tickets, contact, both
-    # SLA for support tickets
-    SUPPORT_TICKET_SLA_ENABLED: bool = True
-    SUPPORT_TICKET_SLA_MINUTES: int = 5
-    SUPPORT_TICKET_SLA_CHECK_INTERVAL_SECONDS: int = 60
-    SUPPORT_TICKET_SLA_REMINDER_COOLDOWN_MINUTES: int = 15
+    # SLA for support tickets. Дефолты совпадают с .env.example: без него бот
+    # поднимался с включённым SLA, порогом 5 минут и повтором раз в 15 — админам
+    # летел спам напоминаний по каждому тикету.
+    SUPPORT_TICKET_SLA_ENABLED: bool = False
+    SUPPORT_TICKET_SLA_MINUTES: int = 60
+    SUPPORT_TICKET_SLA_CHECK_INTERVAL_SECONDS: int = 300
+    SUPPORT_TICKET_SLA_REMINDER_COOLDOWN_MINUTES: int = 30
 
     # MiniApp tickets settings
     MINIAPP_TICKETS_ENABLED: bool = True  # Enable/disable tickets section in miniapp
@@ -49,6 +108,10 @@ class Settings(BaseSettings):
     MINIAPP_SUPPORT_URL: str = ''  # Custom URL to redirect when tickets disabled (only for url type)
 
     ADMIN_NOTIFICATIONS_ENABLED: bool = False
+    # Rich-вид сообщений админ-чата (Bot API 10.1): заголовки, таблицы,
+    # сворачиваемые трейсбеки в error-отчётах. При недоступности сервера
+    # бот сам откатывается на классический вид до рестарта.
+    ADMIN_NOTIFICATIONS_RICH_ENABLED: bool = True
     ADMIN_NOTIFICATIONS_CHAT_ID: str | None = None
     ADMIN_NOTIFICATIONS_TOPIC_ID: int | None = None
     ADMIN_NOTIFICATIONS_TICKET_TOPIC_ID: int | None = None
@@ -167,6 +230,21 @@ class Settings(BaseSettings):
     # mem-DoS при компрометации webhook-секрета). См. RemnaWaveWebhookService.
     REMNAWAVE_WEBHOOK_NODE_COALESCE_WINDOW_SECONDS: float = 10.0
     REMNAWAVE_WEBHOOK_NODE_BUFFER_MAX: int = 500
+
+    # Ограниченный grace-доступ для продления истёкшей подписки.
+    # Режимы: false (выключено), observe (только журнал), true (активно),
+    # drain (не выдавать новые grace-сессии, но завершать уже открытые).
+    GRACE_ACCESS_MODE: Literal['false', 'observe', 'true', 'drain'] = 'false'
+    GRACE_ACCESS_DURATION_HOURS: int = 72
+    GRACE_ACCESS_EXPIRED_SQUAD_UUID: str = ''
+    GRACE_ACCESS_LIMITED_SQUAD_UUID: str = ''
+    GRACE_ACCESS_TRAFFIC_GB: int = 1
+    GRACE_ACCESS_TRIAL_ENABLED: bool = False
+    GRACE_ACCESS_DAILY_ENABLED: bool = False
+    GRACE_ACCESS_FREE_ENABLED: bool = False
+    GRACE_ACCESS_RECONCILE_INTERVAL_SECONDS: int = 60
+    GRACE_ACCESS_RECONCILE_BATCH_SIZE: int = 200
+    GRACE_ACCESS_CANDIDATE_LOOKBACK_MINUTES: int = 30
 
     # Webhook user notification toggles (what Telegram messages users receive from webhook events)
     WEBHOOK_NOTIFY_USER_ENABLED: bool = True
@@ -492,6 +570,14 @@ class Settings(BaseSettings):
     YOOKASSA_WEBHOOK_HOST: str = '0.0.0.0'
     YOOKASSA_WEBHOOK_PORT: int = 8082
     YOOKASSA_TRUSTED_PROXY_NETWORKS: str = ''
+    # Отключает проверку IP-адреса отправителя вебхука (allowlist сетей YooKassa).
+    # Нужно для развёртываний за Anti-DDoS/прокси, который НЕ пробрасывает реальный
+    # IP клиента: до бота доходит только адрес прокси, и allowlist всегда отклоняет
+    # вебхук как forbidden_ip. Когда флаг включён, IP-гейт снимается, но подлинность
+    # платежа подтверждается обязательным (fail-closed) запросом статуса в API YooKassa
+    # внутри process_yookassa_webhook — без подтверждения баланс не начисляется.
+    # По умолчанию выключен: IP-проверка остаётся основным барьером.
+    YOOKASSA_SKIP_IP_CHECK: bool = False
     YOOKASSA_MIN_AMOUNT_KOPEKS: int = 5000
     YOOKASSA_MAX_AMOUNT_KOPEKS: int = 1000000
     YOOKASSA_RECURRENT_ENABLED: bool = False
@@ -604,6 +690,7 @@ class Settings(BaseSettings):
     PLATEGA_WEBHOOK_PATH: str = '/platega-webhook'
     PLATEGA_WEBHOOK_HOST: str = '0.0.0.0'
     PLATEGA_WEBHOOK_PORT: int = 8086
+    PLATEGA_RECURRENT_ENABLED: bool = False  # Рекуррентные СБП-подписки Platega (автопродление)
 
     WATA_ENABLED: bool = False
     WATA_DISPLAY_NAME: str = 'Wata'
@@ -889,6 +976,24 @@ class Settings(BaseSettings):
     DONUT_SBP_QR_ENABLED: bool = False
     DONUT_SBP_QR_DISPLAY_NAME: str = 'СБП QR (Donut)'
 
+    # cisPay (H2H merchant API, api.cispay.app)
+    CISPAY_ENABLED: bool = False
+    CISPAY_SHOP_ID: str | None = None  # X-Shop-ID — UUID магазина
+    CISPAY_API_KEY: str | None = None  # X-Api-Key — секретный ключ (cis_sec_...)
+    CISPAY_BASE_URL: str = 'https://api.cispay.app'
+    CISPAY_DISPLAY_NAME: str = 'CisPay'
+    CISPAY_CURRENCY: str = 'RUB'
+    CISPAY_MIN_AMOUNT_KOPEKS: int = 10000  # 100₽
+    CISPAY_MAX_AMOUNT_KOPEKS: int = 10000000  # 100 000₽
+    CISPAY_WEBHOOK_PATH: str = '/cispay-webhook'
+    # Счёт cisPay живёт 30 минут, после чего переходит в EXPIRED на стороне провайдера
+    CISPAY_PAYMENT_LIFETIME_MINUTES: int = 30
+    # Sub-методы cisPay (payment_method в запросе создания платежа)
+    CISPAY_CARD_ENABLED: bool = False
+    CISPAY_CARD_DISPLAY_NAME: str = 'Карта (CisPay)'
+    CISPAY_SBP_ENABLED: bool = False
+    CISPAY_SBP_DISPLAY_NAME: str = 'СБП (CisPay)'
+
     # Lava (Lava Business API, api.lava.ru)
     LAVA_ENABLED: bool = False
     LAVA_BASE_URL: str = 'https://api.lava.ru'
@@ -941,6 +1046,8 @@ class Settings(BaseSettings):
     # при заданном WEBHOOK_URL и существующем LOGO_FILE логотип отдаётся своим
     # эндпоинтом {origin WEBHOOK_URL}/cabinet/branding/bot-logo. Если Telegram не
     # сможет скачать картинку, меню продолжит отправляться без логотипа до рестарта.
+    # `none` (а также off/no/false/disabled/-) — rich-меню БЕЗ логотипа: пустая
+    # строка занята под авто-режим, поэтому при своём LOGO_FILE шапку иначе не убрать.
     MAIN_MENU_RICH_LOGO_URL: str = ''
 
     # Лог действий пользователя (нажатия кнопок в боте + мутационные запросы в
@@ -1250,6 +1357,36 @@ class Settings(BaseSettings):
         if mode not in {'default', 'cabinet'}:
             raise ValueError('MAIN_MENU_MODE must be one of: default, cabinet')
         return mode
+
+    @field_validator('GRACE_ACCESS_MODE', mode='before')
+    @classmethod
+    def normalize_grace_access_mode(cls, value: str | None) -> str:
+        normalized = str(value or 'false').strip().lower()
+        if normalized not in {'false', 'observe', 'true', 'drain'}:
+            raise ValueError('GRACE_ACCESS_MODE must be one of: false, observe, true, drain')
+        return normalized
+
+    @field_validator(
+        'GRACE_ACCESS_DURATION_HOURS',
+        'GRACE_ACCESS_RECONCILE_INTERVAL_SECONDS',
+        'GRACE_ACCESS_RECONCILE_BATCH_SIZE',
+        'GRACE_ACCESS_CANDIDATE_LOOKBACK_MINUTES',
+        mode='before',
+    )
+    @classmethod
+    def ensure_positive_grace_access_value(cls, value: int | str) -> int:
+        parsed = int(value)
+        if parsed < 1:
+            raise ValueError('Grace access duration, intervals, batch size and lookback must be positive')
+        return parsed
+
+    @field_validator('GRACE_ACCESS_TRAFFIC_GB', mode='before')
+    @classmethod
+    def ensure_nonnegative_grace_access_traffic(cls, value: int | str) -> int:
+        parsed = int(value)
+        if parsed < 0:
+            raise ValueError('Grace access traffic must not be negative')
+        return parsed
 
     @field_validator('SERVER_STATUS_MODE', mode='before')
     @classmethod
@@ -1582,9 +1719,10 @@ class Settings(BaseSettings):
         username_clean = (username or '').lstrip('@')
         full_name_value = full_name or ''
 
-        # Remnawave разрешает только буквы, цифры, подчёркивания и дефисы
+        # Remnawave разрешает только буквы, цифры, подчёркивания и дефисы;
+        # кириллицу переводим в латиницу, чтобы имя не выпадало из username целиком.
         def _sanitize(value: str) -> str:
-            result = re.sub(r'[^0-9A-Za-z_-]+', '_', value)
+            result = re.sub(r'[^0-9A-Za-z_-]+', '_', transliterate_cyrillic(value))
             return re.sub(r'_+', '_', result).strip('_-')
 
         # Для email-пользователей формируем уникальный identifier
@@ -2269,6 +2407,9 @@ class Settings(BaseSettings):
     def is_platega_enabled(self) -> bool:
         return self.PLATEGA_ENABLED and self.PLATEGA_MERCHANT_ID is not None and self.PLATEGA_SECRET is not None
 
+    def is_platega_recurrent_enabled(self) -> bool:
+        return self.is_platega_enabled() and self.PLATEGA_RECURRENT_ENABLED
+
     def get_platega_display_name(self) -> str:
         name = (self.PLATEGA_DISPLAY_NAME or '').strip()
         if not name:
@@ -2637,6 +2778,38 @@ class Settings(BaseSettings):
 
     def get_jupiter_sbp_display_name_html(self) -> str:
         return html.escape(self.get_jupiter_sbp_display_name())
+
+    def is_cispay_enabled(self) -> bool:
+        # Пустая строка так же непригодна, как None: с пустым ключом HMAC вебхука
+        # тривиально подделывается, поэтому включаем только при непустых значениях.
+        return bool(self.CISPAY_ENABLED and self.CISPAY_SHOP_ID and self.CISPAY_API_KEY)
+
+    def get_cispay_display_name(self) -> str:
+        name = (self.CISPAY_DISPLAY_NAME or '').strip()
+        return name or 'CisPay'
+
+    def get_cispay_display_name_html(self) -> str:
+        return html.escape(self.get_cispay_display_name())
+
+    def is_cispay_card_enabled(self) -> bool:
+        return self.CISPAY_CARD_ENABLED and self.is_cispay_enabled()
+
+    def get_cispay_card_display_name(self) -> str:
+        name = (self.CISPAY_CARD_DISPLAY_NAME or '').strip()
+        return name or 'Карта (CisPay)'
+
+    def get_cispay_card_display_name_html(self) -> str:
+        return html.escape(self.get_cispay_card_display_name())
+
+    def is_cispay_sbp_enabled(self) -> bool:
+        return self.CISPAY_SBP_ENABLED and self.is_cispay_enabled()
+
+    def get_cispay_sbp_display_name(self) -> str:
+        name = (self.CISPAY_SBP_DISPLAY_NAME or '').strip()
+        return name or 'СБП (CisPay)'
+
+    def get_cispay_sbp_display_name_html(self) -> str:
+        return html.escape(self.get_cispay_sbp_display_name())
 
     def is_donut_enabled(self) -> bool:
         return self.DONUT_ENABLED and self.DONUT_TOKEN is not None and self.DONUT_SECRET is not None
@@ -3292,6 +3465,25 @@ class Settings(BaseSettings):
             return f'https://t.me/{contact_without_prefix}'
 
         return None
+
+    def is_support_contact_telegram(self) -> bool:
+        """Резолвнутый контакт поддержки ведёт в Telegram, а не на внешний хелпдеск.
+
+        SUPPORT_USERNAME принимает и @username, и произвольный URL, поэтому клиенту
+        нужен явный признак: телеграм-ссылку открывают через openTelegramLink,
+        внешнюю — обычным переходом.
+        """
+        url = self.get_support_contact_url()
+
+        if not url:
+            return False
+
+        if url.startswith('tg://'):
+            return True
+
+        host = (urlparse(url).hostname or '').lower().removeprefix('www.')
+
+        return host in {'t.me', 'telegram.me', 'telegram.dog'}
 
     def get_support_contact_display(self) -> str:
         contact = self._clean_support_contact()

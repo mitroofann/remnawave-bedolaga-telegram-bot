@@ -90,6 +90,8 @@ from ..schemas.users import (
     ResetSubscriptionResponse,
     ResetTrialRequest,
     ResetTrialResponse,
+    SendUserMessageRequest,
+    SendUserMessageResponse,
     SortByEnum,
     SubscriptionListItem,
     SyncFromPanelRequest,
@@ -286,6 +288,18 @@ async def _build_subscription_info_async(db: AsyncSession, subscription: Subscri
     info = _build_subscription_info(subscription, tariff_name=tariff_name)
     info.purchased_traffic_gb = getattr(subscription, 'purchased_traffic_gb', 0) or 0
     info.traffic_purchases = traffic_purchase_items
+
+    # Platega SBP auto-renewal status — admin-only, needs a DB query, so it
+    # lives here rather than in the sync builder. Gated to avoid a needless
+    # query when the feature is off.
+    if settings.is_platega_recurrent_enabled():
+        from app.database.crud import platega_subscription as sub_crud
+
+        record = await sub_crud.get_active_platega_subscription_by_subscription(db, subscription.id)
+        if record:
+            info.sbp_recurring_status = record.status
+            info.sbp_recurring_id = record.id
+
     return info
 
 
@@ -305,6 +319,10 @@ async def _sync_subscription_to_panel(
     try:
         from app.config import settings
         from app.external.remnawave_api import UserStatus as PanelUserStatus
+        from app.services.grace_access_runtime import (
+            create_panel_user_grace_safe,
+            update_panel_user_grace_safe,
+        )
         from app.services.remnawave_service import RemnaWaveService
         from app.services.subscription_service import get_traffic_reset_strategy
         from app.utils.subscription_utils import resolve_hwid_device_limit_for_payload
@@ -417,7 +435,11 @@ async def _sync_subscription_to_panel(
                     update_kwargs['external_squad_uuid'] = ext_squad_uuid
 
                 try:
-                    updated_panel_user = await api.update_user(**update_kwargs)
+                    updated_panel_user = await update_panel_user_grace_safe(
+                        api,
+                        subscription.id,
+                        **update_kwargs,
+                    )
                     subscription.subscription_url = updated_panel_user.subscription_url
                     subscription.subscription_crypto_link = updated_panel_user.happ_crypto_link
                     subscription.remnawave_short_uuid = updated_panel_user.short_uuid
@@ -453,7 +475,11 @@ async def _sync_subscription_to_panel(
                 # multi-tariff suffix уже встроен в `username` через
                 # build_remnawave_subscription_username — больше ничего не клеим.
 
-                new_panel_user = await api.create_user(**create_kwargs)
+                new_panel_user = await create_panel_user_grace_safe(
+                    api,
+                    subscription.id,
+                    **create_kwargs,
+                )
                 subscription.remnawave_uuid = new_panel_user.uuid
                 subscription.remnawave_short_uuid = new_panel_user.short_uuid
                 subscription.subscription_url = new_panel_user.subscription_url
@@ -1299,11 +1325,16 @@ async def update_user_subscription(
             )
 
         # Сокращение через отрицательный аргумент: extend_subscription(-N) уменьшает end_date
-        await extend_subscription(db, subscription, -request.days)
+        await extend_subscription(db, subscription, -request.days, commit=False)
+        now = datetime.now(UTC)
+        if subscription.end_date <= now:
+            subscription.status = SubscriptionStatus.EXPIRED.value
+            subscription.grace_suppressed_until = now
+        await db.commit()
         await db.refresh(subscription)
 
         # Check if subscription expired after shortening
-        if subscription.end_date <= datetime.now(UTC):
+        if subscription.end_date <= now:
             subscription.status = SubscriptionStatus.EXPIRED.value
             await db.commit()
             await db.refresh(subscription)
@@ -1333,6 +1364,7 @@ async def update_user_subscription(
             subscription.status = SubscriptionStatus.ACTIVE.value
         else:
             subscription.status = SubscriptionStatus.EXPIRED.value
+            subscription.grace_suppressed_until = datetime.now(UTC)
 
         await db.commit()
         await db.refresh(subscription)
@@ -1354,6 +1386,15 @@ async def update_user_subscription(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail='tariff_id parameter is required',
             )
+
+        # Смена тарифа делает СБП-привязку Platega несогласованной: она продолжила
+        # бы списывать СТАРУЮ сумму со СТАРЫМ каденсом. Отменяем привязку — юзер
+        # переподключит СБП-автопродление под новый тариф (нужна новая
+        # банковская авторизация, молча пересоздать нельзя).
+        if request.tariff_id != subscription.tariff_id:
+            from app.services.payment.platega import cancel_platega_recurring_for_subscription_safe
+
+            await cancel_platega_recurring_for_subscription_safe(db, subscription.id)
 
         tariff = await get_tariff_by_id(db, request.tariff_id)
         if not tariff:
@@ -1475,6 +1516,13 @@ async def update_user_subscription(
         await db.commit()
         await db.refresh(subscription)
 
+        if request.autopay_enabled:
+            # Взаимоисключение движков продления: включение balance-autopay
+            # отменяет активное СБП-автопродление Platega (иначе двойное списание).
+            from app.services.payment.platega import cancel_platega_recurring_for_subscription_safe
+
+            await cancel_platega_recurring_for_subscription_safe(db, subscription.id)
+
         state = 'enabled' if request.autopay_enabled else 'disabled'
         logger.info('Admin autopay for user', admin_id=admin.id, state=state, user_id=user_id)
 
@@ -1485,8 +1533,16 @@ async def update_user_subscription(
         )
 
     if request.action == 'cancel':
+        # Подписку убивают — СБП-автопродление Platega обязано умереть вместе с
+        # ней, иначе следующий коллбек продлит и воскресит её, а банк продолжит
+        # списывать.
+        from app.services.payment.platega import cancel_platega_recurring_for_subscription_safe
+
+        await cancel_platega_recurring_for_subscription_safe(db, subscription.id)
+
         subscription.status = SubscriptionStatus.EXPIRED.value
         subscription.end_date = datetime.now(UTC)
+        subscription.grace_suppressed_until = subscription.end_date
         # For daily tariffs: mark as paused to prevent auto-resume by DailySubscriptionService
         if subscription.tariff and getattr(subscription.tariff, 'is_daily', False):
             subscription.is_daily_paused = True
@@ -1690,6 +1746,40 @@ async def update_user_subscription(
     )
 
 
+@router.post('/{user_id}/subscriptions/{sub_id}/cancel-sbp-recurring')
+async def cancel_user_sbp_recurring(
+    user_id: int,
+    sub_id: int,
+    admin: User = Depends(require_permission('users:subscription')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Admin best-effort cancel of a user's active Platega SBP auto-renewal.
+
+    Verifies ``sub_id`` belongs to ``user_id`` (IDOR guard, same as the
+    devices/traffic endpoints) before delegating to the same best-effort
+    helper the reset/delete subscription flows already use (Task 11);
+    idempotent — calling it with no active record is a no-op.
+    """
+    from app.database.crud.subscription import get_subscription_by_id_for_user
+
+    subscription = await get_subscription_by_id_for_user(db, sub_id, user_id)
+    if not subscription:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Subscription not found')
+
+    from app.services.payment.platega import cancel_platega_recurring_for_subscription_safe
+
+    await cancel_platega_recurring_for_subscription_safe(db, sub_id)
+
+    logger.info(
+        'Admin cancelled SBP auto-renewal for subscription',
+        admin_id=admin.id,
+        user_id=user_id,
+        subscription_id=sub_id,
+    )
+
+    return {'status': 'cancelled'}
+
+
 # === Available Tariffs ===
 
 
@@ -1886,6 +1976,101 @@ async def unblock_user(
         new_status='active',
         message='User unblocked',
     )
+
+
+# === Direct Message ===
+
+
+@router.post('/{user_id}/send-message', response_model=SendUserMessageResponse)
+async def send_user_message(
+    user_id: int,
+    request: SendUserMessageRequest,
+    admin: User = Depends(require_permission('users:send_message')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Send a direct Telegram message to the user via the bot.
+
+    Parity with the bot's «✉️ Отправить сообщение» action in the admin user
+    card. Email-only users (no telegram_id) cannot receive Telegram messages —
+    the endpoint returns 400 with a distinct code so the frontend can explain.
+    """
+    from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+
+    from app.bot_factory import create_bot
+
+    target_user = await get_user_by_id(db, user_id)
+    if not target_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
+
+    if not target_user.telegram_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                'code': 'no_telegram_id',
+                'message': 'User is registered by email only and cannot receive Telegram messages',
+            },
+        )
+
+    if not settings.BOT_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={'code': 'bot_not_configured', 'message': 'Bot token is not configured'},
+        )
+
+    text = request.text.strip()
+    if not text:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={'code': 'empty_message', 'message': 'Message text is empty'},
+        )
+
+    bot = create_bot()
+    try:
+        await bot.send_message(target_user.telegram_id, text, parse_mode='HTML')
+    except TelegramForbiddenError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                'code': 'forbidden',
+                'message': 'User has blocked the bot or cannot receive messages',
+            },
+        )
+    except TelegramBadRequest as err:
+        logger.error(
+            'Cabinet: Telegram rejected direct message to user',
+            user_id=user_id,
+            telegram_id=target_user.telegram_id,
+            error=str(err),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                'code': 'bad_request',
+                'message': 'Telegram rejected the message — check the text (HTML markup) and try again',
+            },
+        )
+    except Exception as err:
+        logger.error(
+            'Cabinet: unexpected error sending direct message to user',
+            user_id=user_id,
+            telegram_id=target_user.telegram_id,
+            error=str(err),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={'code': 'send_failed', 'message': 'Failed to send the message, try again later'},
+        )
+    finally:
+        await bot.session.close()
+
+    logger.info(
+        'Cabinet: direct message sent to user',
+        admin_id=admin.id,
+        user_id=user_id,
+        telegram_id=target_user.telegram_id,
+        text_length=len(text),
+    )
+    return SendUserMessageResponse(success=True, message='Message sent')
 
 
 # === Restrictions Management ===
@@ -2520,6 +2705,18 @@ async def delete_user(
         await soft_delete_user(db, user)
         action = 'soft deleted'
     else:
+        from app.services.grace_access_runtime import (
+            GraceAccessDeletionBlocked,
+            ensure_no_open_grace_for_user,
+        )
+
+        try:
+            await ensure_no_open_grace_for_user(db, user.id)
+        except GraceAccessDeletionBlocked as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail='Open grace access must be drained or restored before permanent deletion.',
+            ) from error
         # Hard delete
         await db.delete(user)
         await db.commit()
@@ -2566,6 +2763,14 @@ async def full_delete_user(
     delete_result = await user_service.delete_user_account(
         db, user_id, admin_id_val, force_panel_delete=request.delete_from_panel
     )
+
+    if delete_result.grace_blocked:
+        # Паритет с обычным delete-эндпоинтом: блокировка открытым grace — это
+        # конфликт состояния, а не «успешный» ответ с success=false.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='Open grace access must be drained or restored before permanent deletion.',
+        )
 
     reason_text = f' (reason: {request.reason})' if request.reason else ''
     logger.info(
@@ -2690,6 +2895,38 @@ async def reset_user_subscription(
             panel_deactivated=False,
         )
 
+    from app.services.grace_access_runtime import (
+        GraceAccessDeletionBlocked,
+        ensure_no_open_grace_for_subscriptions,
+    )
+
+    try:
+        await ensure_no_open_grace_for_subscriptions(db, tuple(sub.id for sub in subs))
+    except GraceAccessDeletionBlocked as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='Open grace access must be drained or restored before resetting subscriptions.',
+        ) from error
+
+    # Best-effort: stop Platega SBP autopay before any irreversible panel/DB
+    # step. Each cancellation commits its own transaction internally, which
+    # releases the grace-guard's Postgres advisory lock acquired just above.
+    # It therefore runs BEFORE panel deactivation and the DB deletes, and the
+    # guard is re-acquired immediately below — closing that window before
+    # anything that can't be undone happens.
+    from app.services.payment.platega import cancel_platega_recurring_for_subscription_safe
+
+    for sub in subs:
+        await cancel_platega_recurring_for_subscription_safe(db, sub.id)
+
+    try:
+        await ensure_no_open_grace_for_subscriptions(db, tuple(sub.id for sub in subs))
+    except GraceAccessDeletionBlocked as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='Open grace access must be drained or restored before resetting subscriptions.',
+        ) from error
+
     # Deactivate in Remnawave panel if requested
     if request.deactivate_in_panel:
         try:
@@ -2700,12 +2937,12 @@ async def reset_user_subscription(
                 for sub in subs:
                     if sub.remnawave_uuid:
                         try:
-                            await subscription_service.disable_remnawave_user(sub.remnawave_uuid)
+                            await subscription_service.disable_remnawave_user(sub.remnawave_uuid, db=db)
                         except Exception:
                             pass
                 panel_deactivated = True
             elif user.remnawave_uuid:
-                panel_deactivated = await subscription_service.disable_remnawave_user(user.remnawave_uuid)
+                panel_deactivated = await subscription_service.disable_remnawave_user(user.remnawave_uuid, db=db)
             if panel_deactivated:
                 logger.info('Disabled Remnawave users for subscription reset', user_id=user_id)
         except Exception as e:
@@ -2782,12 +3019,12 @@ async def disable_user(
                 for sub in subs:
                     if sub.remnawave_uuid:
                         try:
-                            await subscription_service.disable_remnawave_user(sub.remnawave_uuid)
+                            await subscription_service.disable_remnawave_user(sub.remnawave_uuid, db=db)
                         except Exception:
                             pass
                 panel_deactivated = True
             elif user.remnawave_uuid:
-                panel_deactivated = await subscription_service.disable_remnawave_user(user.remnawave_uuid)
+                panel_deactivated = await subscription_service.disable_remnawave_user(user.remnawave_uuid, db=db)
             if panel_deactivated:
                 logger.info('Disabled Remnawave user(s)', user_id=user_id)
         except Exception as e:
@@ -3750,6 +3987,10 @@ async def sync_user_to_panel(
     try:
         from app.config import settings
         from app.external.remnawave_api import UserStatus as PanelUserStatus
+        from app.services.grace_access_runtime import (
+            create_panel_user_grace_safe,
+            update_panel_user_grace_safe,
+        )
         from app.services.remnawave_service import RemnaWaveService
         from app.services.subscription_service import get_traffic_reset_strategy
         from app.utils.subscription_utils import resolve_hwid_device_limit_for_payload
@@ -3876,7 +4117,11 @@ async def sync_user_to_panel(
                     update_kwargs['external_squad_uuid'] = ext_squad_uuid
 
                 try:
-                    await api.update_user(**update_kwargs)
+                    await update_panel_user_grace_safe(
+                        api,
+                        sub.id,
+                        **update_kwargs,
+                    )
                     action = 'updated'
                 except Exception as update_error:
                     error_code = (getattr(update_error, 'response_data', None) or {}).get('errorCode', '')
@@ -3910,7 +4155,11 @@ async def sync_user_to_panel(
                 # multi-tariff suffix уже встроен в `username` через
                 # build_remnawave_subscription_username — больше ничего не клеим.
 
-                new_panel_user = await api.create_user(**create_kwargs)
+                new_panel_user = await create_panel_user_grace_safe(
+                    api,
+                    sub.id,
+                    **create_kwargs,
+                )
                 panel_uuid = new_panel_user.uuid
                 sub.remnawave_uuid = new_panel_user.uuid
                 sub.remnawave_short_uuid = new_panel_user.short_uuid

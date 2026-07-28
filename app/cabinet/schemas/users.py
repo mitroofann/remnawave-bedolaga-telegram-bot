@@ -70,6 +70,11 @@ class UserSubscriptionInfo(BaseModel):
     purchased_traffic_gb: int = 0
     traffic_purchases: list[TrafficPurchaseItem] = []
 
+    # Platega SBP auto-renewal (admin view only — populated by the async
+    # builder; the sync builder leaves both at their None default).
+    sbp_recurring_status: str | None = None
+    sbp_recurring_id: int | None = None
+
 
 class UserPromoGroupInfo(BaseModel):
     """User promo group info."""
@@ -396,6 +401,21 @@ class UpdateUserStatusResponse(BaseModel):
     success: bool
     old_status: str
     new_status: str
+    message: str
+
+
+class SendUserMessageRequest(BaseModel):
+    """Request to send a direct Telegram message to a user (parity with the
+    bot's «Отправить сообщение» action in the admin user card)."""
+
+    # 4096 — лимит Telegram на текст сообщения
+    text: str = Field(..., min_length=1, max_length=4096, description='Message text (HTML)')
+
+
+class SendUserMessageResponse(BaseModel):
+    """Response after sending a direct message."""
+
+    success: bool
     message: str
 
 

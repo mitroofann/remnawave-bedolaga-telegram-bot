@@ -412,6 +412,9 @@ async def get_purchase_options(
                 # Направления смены тарифа
                 'tariff_switch_upgrade_enabled': settings.TARIFF_SWITCH_UPGRADE_ENABLED,
                 'tariff_switch_downgrade_enabled': settings.TARIFF_SWITCH_DOWNGRADE_ENABLED,
+                # СБП-оформление (Platega recurrent): фронт показывает кнопку
+                # «Оформить с автооплатой СБП» рядом с покупкой с баланса.
+                'platega_recurrent_enabled': settings.is_platega_recurrent_enabled(),
             }
 
         # Classic mode - return periods
@@ -983,10 +986,27 @@ async def purchase_tariff(
             # TARIFF_SWITCH_RESET_FREE_DAYS перебивает TRIAL_ADD_REMAINING_DAYS_TO_PAID).
             _bonus_seconds = 0
             _now_trial = datetime.now(UTC)
+            # В мульти-тарифе create-ветка ниже (нет живой подписки покупаемого
+            # тарифа) НЕ должна глушить живой триал здесь: create_paid_subscription
+            # конвертирует его на месте (та же строка, тот же Remnawave-юзер и
+            # ссылка) вместо вставки новой подписки. Убив его заранее, мы бы
+            # спрятали кандидата от конверсии и вернули старое поведение — новый
+            # панельный юзер + мёртвый триал, висящий в кабинете. Его остаток
+            # дней переносит extend_subscription внутри конверсии, поэтому в
+            # _bonus_seconds кандидат не попадает — двойного начисления нет.
+            # resolve_trial_conversion_candidate повторяет приоритеты
+            # create_paid_subscription (в т.ч. вернёт None, когда сработает
+            # revive-ветка #3004) — тогда триал глушится по-старому: с переносом
+            # остатка и отключением панельного юзера в цикле ниже.
+            _conversion_trial = None
+            if subscription is None and settings.is_multi_tariff_enabled():
+                from app.database.crud.subscription import resolve_trial_conversion_candidate
+
+                _conversion_trial = await resolve_trial_conversion_candidate(db, user.id, tariff.id)
             killed_trials = await deactivate_user_trial_subscriptions(
                 db,
                 user.id,
-                exclude_subscription_id=subscription.id if subscription else None,
+                exclude_subscription_id=subscription.id if subscription else getattr(_conversion_trial, 'id', None),
             )
             if should_carry_trial_remaining_days():
                 for _kt in killed_trials:
@@ -1016,7 +1036,7 @@ async def purchase_tariff(
                     connected_squads=squads,
                 )
             else:
-                # Create new subscription
+                # Create new subscription (или конверсия исключённого выше триала)
                 try:
                     subscription = await create_paid_subscription(
                         db=db,
@@ -1026,6 +1046,7 @@ async def purchase_tariff(
                         device_limit=tariff.device_limit,
                         connected_squads=squads,
                         tariff_id=tariff.id,
+                        conversion_trial=_conversion_trial,
                     )
                 except IntegrityError:
                     # Partial unique index violation: user already has active subscription for this tariff
@@ -1238,7 +1259,10 @@ async def purchase_tariff(
                         subscription=subscription,
                         transaction=transaction,
                         period_days=period_days,
-                        was_trial_conversion=False,
+                        # Маркер ставит extend_subscription, когда покупка
+                        # конвертировала живой триал (в т.ч. конверсию внутри
+                        # create_paid_subscription).
+                        was_trial_conversion=bool(getattr(subscription, '_converted_from_trial', False)),
                         amount_kopeks=price_kopeks,
                         purchase_type='renewal' if not was_new_subscription else 'first_purchase',
                     )
