@@ -1100,6 +1100,7 @@
   "MAIN_MENU_RICH_BALANCE": "💰 Balance: {balance}",
   "MAIN_MENU_RICH_CONNECT": "⚡ Connect",
   "MAIN_MENU_RICH_DAYS_LEFT": "{days} d. left",
+  "MAIN_MENU_RICH_EXPIRES_RELATIVE": "⏳ expires {when}",
   "MAIN_MENU_RICH_DEVICES": "📱 Devices: {devices}",
   "MAIN_MENU_RICH_FOREIGN_TRAFFIC": "📊 Traffic to foreign locations: Unlimited",
   "MAIN_MENU_RICH_HINTS_SUMMARY": "💡 Offers & tips",

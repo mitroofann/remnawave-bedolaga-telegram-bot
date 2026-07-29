@@ -193,6 +193,7 @@ class BotConfigurationService:
         'MODERATION': '🛡️ Модерация и фильтры',
         'BAN_NOTIFICATIONS': '🚫 Тексты уведомлений о блокировках',
         'INFO_PAGES': '📄 Инфо-страницы',
+        'CUSTOM_UI': '🎨 Кастомный интерфейс',
     }
 
     CATEGORY_DESCRIPTIONS: dict[str, str] = {
@@ -266,6 +267,7 @@ class BotConfigurationService:
         'MODERATION': 'Настройки фильтров отображаемых имен и защиты от фишинга.',
         'BAN_NOTIFICATIONS': 'Тексты уведомлений о блокировках, которые отправляются пользователям.',
         'INFO_PAGES': 'Видимость встроенных страниц (правила, политика, оферта, FAQ) в боте и веб-кабинете.',
+        'CUSTOM_UI': 'Кастомные элементы интерфейса форка. Выключение возвращает стандартный вид разработчика.',
     }
 
     @staticmethod
@@ -281,6 +283,7 @@ class BotConfigurationService:
     CATEGORY_KEY_OVERRIDES: dict[str, str] = {
         'DATABASE_URL': 'DATABASE',
         'DATABASE_MODE': 'DATABASE',
+        'PROMOCODE_BUTTON_VISIBLE': 'CUSTOM_UI',
         'LOCALES_PATH': 'LOCALIZATION',
         'CHANNEL_IS_REQUIRED_SUB': 'CHANNEL',
         'BOT_USERNAME': 'CORE',
@@ -481,6 +484,7 @@ class BotConfigurationService:
         'DEBUG': 'DEBUG',
         'DISPLAY_NAME_': 'MODERATION',
         'BAN_MSG_': 'BAN_NOTIFICATIONS',
+        'CUSTOM_': 'CUSTOM_UI',
     }
 
     CHOICES: dict[str, list[ChoiceOption]] = {

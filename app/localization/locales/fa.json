@@ -1222,6 +1222,7 @@
   "MAIN_MENU_RICH_BALANCE": "💰 موجودی: {balance}",
   "MAIN_MENU_RICH_CONNECT": "⚡ اتصال",
   "MAIN_MENU_RICH_DAYS_LEFT": "{days} روز مانده",
+  "MAIN_MENU_RICH_EXPIRES_RELATIVE": "⏳ انقضا {when}",
   "MAIN_MENU_RICH_DEVICES": "📱 دستگاه‌ها: {devices}",
   "MAIN_MENU_RICH_FOREIGN_TRAFFIC": "📊 ترافیک به لوکیشن‌های خارجی: نامحدود",
   "MAIN_MENU_RICH_HINTS_SUMMARY": "💡 پیشنهادها و نکات",

@@ -582,6 +582,269 @@ def get_main_menu_keyboard(
     is_moderator: bool = False,
     custom_buttons: list[InlineKeyboardButton] | None = None,
 ) -> InlineKeyboardMarkup:
+    # CUSTOM_MAIN_MENU_LAYOUT_ENABLED=True → кастомная раскладка форка
+    # (_build_custom_main_menu_keyboard). False → дословная раскладка разработчика
+    # (origin/main) ниже. Тумблер в «Управление ботом» (категория «Кастомный интерфейс»).
+    # Тело разработчика держим неизменным, чтобы pull из upstream мёржился без конфликтов.
+    if settings.CUSTOM_MAIN_MENU_LAYOUT_ENABLED:
+        return _build_custom_main_menu_keyboard(
+            language,
+            is_admin=is_admin,
+            has_had_paid_subscription=has_had_paid_subscription,
+            has_active_subscription=has_active_subscription,
+            subscription_is_active=subscription_is_active,
+            balance_kopeks=balance_kopeks,
+            subscription=subscription,
+            show_resume_checkout=show_resume_checkout,
+            has_saved_cart=has_saved_cart,
+            is_moderator=is_moderator,
+            custom_buttons=custom_buttons,
+        )
+
+    texts = get_texts(language)
+
+    if settings.is_cabinet_mode():
+        return _build_cabinet_main_menu_keyboard(
+            language,
+            texts,
+            is_admin=is_admin,
+            is_moderator=is_moderator,
+            balance_kopeks=balance_kopeks,
+        )
+
+    if settings.DEBUG:
+        logger.debug(
+            'DEBUG KEYBOARD',
+            language=language,
+            is_admin=is_admin,
+            has_had_paid=has_had_paid_subscription,
+            has_active=has_active_subscription,
+            sub_active=subscription_is_active,
+            balance=balance_kopeks,
+        )
+
+    safe_balance = balance_kopeks or 0
+    if hasattr(texts, 'BALANCE_BUTTON') and safe_balance > 0:
+        balance_button_text = texts.BALANCE_BUTTON.format(balance=texts.format_price(safe_balance))
+    else:
+        balance_button_text = texts.t(
+            'BALANCE_BUTTON_DEFAULT',
+            '💰 Баланс: {balance}',
+        ).format(balance=texts.format_price(safe_balance))
+
+    keyboard: list[list[InlineKeyboardButton]] = []
+    paired_buttons: list[InlineKeyboardButton] = []
+
+    if has_active_subscription and subscription_is_active:
+        connect_mode = settings.CONNECT_BUTTON_MODE
+        subscription_link = get_display_subscription_link(subscription)
+
+        def _fallback_connect_button() -> InlineKeyboardButton:
+            return InlineKeyboardButton(
+                text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
+                callback_data='subscription_connect',
+            )
+
+        if connect_mode == 'miniapp_subscription':
+            if subscription_link:
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
+                            web_app=types.WebAppInfo(url=subscription_link),
+                        )
+                    ]
+                )
+            else:
+                keyboard.append([_fallback_connect_button()])
+        elif connect_mode == 'miniapp_custom':
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
+                        web_app=types.WebAppInfo(url=settings.MINIAPP_CUSTOM_URL),
+                    )
+                ]
+            )
+        elif connect_mode == 'link':
+            if subscription_link:
+                keyboard.append(
+                    [InlineKeyboardButton(text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'), url=subscription_link)]
+                )
+            else:
+                keyboard.append([_fallback_connect_button()])
+        elif connect_mode == 'happ_cryptolink':
+            if subscription_link:
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
+                            callback_data=(
+                                'subscription_connect'
+                                if settings.is_multi_tariff_enabled()
+                                else 'open_subscription_link'
+                            ),
+                        )
+                    ]
+                )
+            else:
+                keyboard.append([_fallback_connect_button()])
+        else:
+            keyboard.append([_fallback_connect_button()])
+
+        happ_row = get_happ_download_button_row(texts)
+        if happ_row:
+            keyboard.append(happ_row)
+        sub_btn_text = (
+            texts.t('MY_SUBSCRIPTIONS_BUTTON', '📱 Мои подписки')
+            if settings.is_multi_tariff_enabled()
+            else texts.MENU_SUBSCRIPTION
+        )
+        paired_buttons.append(InlineKeyboardButton(text=sub_btn_text, callback_data='menu_subscription'))
+
+        # Добавляем кнопку докупки трафика для лимитированных подписок
+        # В режиме тарифов проверяем tariff_id (детальная проверка в хендлере)
+        # В классическом режиме проверяем глобальные настройки
+        show_traffic_topup = False
+        if subscription and not subscription.is_trial and (subscription.traffic_limit_gb or 0) > 0:
+            if settings.is_tariffs_mode() and getattr(subscription, 'tariff_id', None):
+                # Режим тарифов - показываем кнопку, проверка настроек тарифа в хендлере
+                show_traffic_topup = settings.BUY_TRAFFIC_BUTTON_VISIBLE
+            elif settings.is_traffic_topup_enabled() and not settings.is_traffic_topup_blocked():
+                # Классический режим - проверяем глобальные настройки
+                show_traffic_topup = settings.BUY_TRAFFIC_BUTTON_VISIBLE
+
+        if show_traffic_topup:
+            paired_buttons.append(
+                InlineKeyboardButton(
+                    text=texts.t('BUY_TRAFFIC_BUTTON', '📈 Докупить трафик'), callback_data='buy_traffic'
+                )
+            )
+
+    keyboard.append([InlineKeyboardButton(text=balance_button_text, callback_data='menu_balance')])
+
+    show_trial = (
+        not has_had_paid_subscription
+        and not has_active_subscription
+        and settings.TRIAL_DURATION_DAYS > 0
+        and settings.TRIAL_DISABLED_FOR != 'all'
+    )
+
+    show_buy = not has_active_subscription or not subscription_is_active
+    current_subscription = subscription
+    bool(
+        current_subscription
+        and not getattr(current_subscription, 'is_trial', False)
+        and getattr(current_subscription, 'is_active', False)
+    )
+    simple_purchase_button = None
+    if settings.SIMPLE_SUBSCRIPTION_ENABLED:
+        simple_purchase_button = InlineKeyboardButton(
+            text=texts.MENU_SIMPLE_SUBSCRIPTION,
+            callback_data='simple_subscription_purchase',
+        )
+
+    subscription_buttons: list[InlineKeyboardButton] = []
+
+    if show_trial:
+        subscription_buttons.append(InlineKeyboardButton(text=texts.MENU_TRIAL, callback_data='menu_trial'))
+
+    if show_buy:
+        subscription_buttons.append(InlineKeyboardButton(text=texts.MENU_BUY_SUBSCRIPTION, callback_data='menu_buy'))
+
+    if subscription_buttons:
+        paired_buttons.extend(subscription_buttons)
+    if simple_purchase_button:
+        paired_buttons.append(simple_purchase_button)
+
+    if show_resume_checkout or has_saved_cart:
+        resume_callback = 'return_to_saved_cart' if has_saved_cart else 'subscription_resume_checkout'
+        paired_buttons.append(
+            InlineKeyboardButton(
+                text=texts.RETURN_TO_SUBSCRIPTION_CHECKOUT,
+                callback_data=resume_callback,
+            )
+        )
+
+    if custom_buttons:
+        for button in custom_buttons:
+            if isinstance(button, InlineKeyboardButton):
+                paired_buttons.append(button)
+
+    # Добавляем кнопки промокода и рефералов, учитывая настройки
+    paired_buttons.append(InlineKeyboardButton(text=texts.MENU_PROMOCODE, callback_data='menu_promocode'))
+
+    # Добавляем кнопку рефералов, только если программа включена
+    if settings.is_referral_program_enabled():
+        paired_buttons.append(InlineKeyboardButton(text=texts.MENU_REFERRALS, callback_data='menu_referrals'))
+
+    # Добавляем кнопку конкурсов
+    if settings.CONTESTS_ENABLED and settings.CONTESTS_BUTTON_VISIBLE:
+        paired_buttons.append(
+            InlineKeyboardButton(text=texts.t('CONTESTS_BUTTON', '🎲 Конкурсы'), callback_data='contests_menu')
+        )
+
+    try:
+        from app.services.support_settings_service import SupportSettingsService
+
+        support_enabled = SupportSettingsService.is_support_menu_enabled()
+    except Exception:
+        support_enabled = settings.SUPPORT_MENU_ENABLED
+
+    if support_enabled:
+        paired_buttons.append(InlineKeyboardButton(text=texts.MENU_SUPPORT, callback_data='menu_support'))
+
+    # Добавляем кнопку активации
+    if settings.ACTIVATE_BUTTON_VISIBLE:
+        paired_buttons.append(InlineKeyboardButton(text=settings.ACTIVATE_BUTTON_TEXT, callback_data='activate_button'))
+
+    paired_buttons.append(
+        InlineKeyboardButton(
+            text=texts.t('MENU_INFO', 'ℹ️ Инфо'),
+            callback_data='menu_info',
+        )
+    )
+
+    if settings.is_language_selection_enabled():
+        paired_buttons.append(InlineKeyboardButton(text=texts.MENU_LANGUAGE, callback_data='menu_language'))
+
+    for i in range(0, len(paired_buttons), 2):
+        row = paired_buttons[i : i + 2]
+        keyboard.append(row)
+
+    if settings.DEBUG:
+        logger.debug('DEBUG KEYBOARD: админ кнопка', is_admin=is_admin)
+
+    if is_admin:
+        if settings.DEBUG:
+            logger.debug('DEBUG KEYBOARD: Админ кнопка ДОБАВЛЕНА')
+        keyboard.append([InlineKeyboardButton(text=texts.MENU_ADMIN, callback_data='admin_panel')])
+    elif settings.DEBUG:
+        logger.debug('DEBUG KEYBOARD: Админ кнопка НЕ добавлена')
+    # Moderator access (limited support panel)
+    if (not is_admin) and is_moderator:
+        keyboard.append([InlineKeyboardButton(text='🧑‍⚖️ Модерация', callback_data='moderator_panel')])
+
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def _build_custom_main_menu_keyboard(
+    language: str = DEFAULT_LANGUAGE,
+    is_admin: bool = False,
+    has_had_paid_subscription: bool = False,
+    has_active_subscription: bool = False,
+    subscription_is_active: bool = False,
+    balance_kopeks: int = 0,
+    subscription=None,
+    show_resume_checkout: bool = False,
+    has_saved_cart: bool = False,  # Новый параметр для отображения уведомления о сохраненной корзине
+    *,
+    is_moderator: bool = False,
+    custom_buttons: list[InlineKeyboardButton] | None = None,
+) -> InlineKeyboardMarkup:
+    # Кастомная раскладка главного меню форка (тумблер CUSTOM_MAIN_MENU_LAYOUT_ENABLED,
+    # см. коммит 333bae62): баланс+подписка в один ряд, нижний ряд из трёх кнопок
+    # (Рефералы/Техподдержка/Инфо), кнопка «Промокод» за PROMOCODE_BUTTON_VISIBLE.
     texts = get_texts(language)
 
     if settings.is_cabinet_mode():
@@ -1264,15 +1527,16 @@ def get_subscription_keyboard(
                             text=texts.t('BUY_TARIFF_BUTTON', '📦 Купить тариф'), callback_data='menu_buy'
                         )
                     )
-                else:
-                    # Кнопка «Тариф» открывает страницу покупки/смены тарифа в
-                    # miniapp-кабинете в любом MAIN_MENU_MODE: web_app по
-                    # MINIAPP_CUSTOM_URL (/subscription/purchase), иначе
-                    # t.me-диплинк Mini App (MINIAPP_APP_SHORT_NAME). Без того и
-                    # другого — прежнее поведение: список тарифов / instant switch.
-                    # Бесплатный (0₽) тариф — тоже через список с выбором периода: prorated
-                    # instant-switch посчитал бы доплату за весь остаток бесплатных дней
-                    # и перенёс бы их на платный тариф вопреки TARIFF_SWITCH_RESET_FREE_DAYS.
+                elif settings.CUSTOM_TARIFF_MINIAPP_BUTTON_ENABLED:
+                    # Кастом форка (тумблер CUSTOM_TARIFF_MINIAPP_BUTTON_ENABLED): кнопка
+                    # «Тариф» открывает страницу покупки/смены тарифа в miniapp-кабинете
+                    # в любом MAIN_MENU_MODE: web_app по MINIAPP_CUSTOM_URL
+                    # (/subscription/purchase), иначе t.me-диплинк Mini App
+                    # (MINIAPP_APP_SHORT_NAME). Без того и другого — прежнее поведение:
+                    # список тарифов / instant switch. Бесплатный (0₽) тариф — тоже через
+                    # список с выбором периода: prorated instant-switch посчитал бы доплату
+                    # за весь остаток бесплатных дней и перенёс бы их на платный тариф
+                    # вопреки TARIFF_SWITCH_RESET_FREE_DAYS.
                     from app.utils.miniapp_buttons import build_cabinet_url, build_miniapp_startapp_url
 
                     tariff_button_text = texts.t('CHANGE_TARIFF_BUTTON', '📦 Тариф')
@@ -1295,6 +1559,21 @@ def get_subscription_keyboard(
                         settings_row.append(
                             InlineKeyboardButton(text=tariff_button_text, callback_data=tariff_callback)
                         )
+                else:
+                    # Версия разработчика (origin/main), дословно. Для суточных тарифов —
+                    # список тарифов, для обычных — мгновенное переключение. Бесплатный (0₽)
+                    # тариф — через список с выбором периода: prorated instant-switch посчитал
+                    # бы доплату за весь остаток бесплатных дней и перенёс бы их на платный
+                    # тариф вопреки TARIFF_SWITCH_RESET_FREE_DAYS.
+                    is_free_tariff = bool(
+                        tariff and getattr(tariff, 'is_free', False) and settings.TARIFF_SWITCH_RESET_FREE_DAYS
+                    )
+                    tariff_callback = 'tariff_switch' if (is_daily_tariff or is_free_tariff) else 'instant_switch'
+                    settings_row.append(
+                        InlineKeyboardButton(
+                            text=texts.t('CHANGE_TARIFF_BUTTON', '📦 Тариф'), callback_data=tariff_callback
+                        )
+                    )
             keyboard.append(settings_row)
 
             # Кнопка докупки трафика для платных подписок

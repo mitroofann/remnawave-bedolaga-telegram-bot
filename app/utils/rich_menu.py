@@ -56,6 +56,7 @@ from app.utils.validators import sanitize_html
 logger = structlog.get_logger(__name__)
 
 _RTL_LANGUAGES = frozenset({'ar', 'fa', 'he'})
+_PROGRESS_BAR_LENGTH = 10
 
 # Сервер не поддерживает rich-сообщения (устаревший self-hosted bot-api).
 # Взводится один раз до рестарта — по образцу _happ_encrypt_unavailable.
@@ -231,6 +232,18 @@ def _tg_time(moment: datetime, time_format: str, fallback: str) -> str:
     if not 0 < unix_time <= _TG_TIME_MAX_UNIX:
         return html.escape(fallback)
     return f'<tg-time unix="{unix_time}" format="{time_format}">{html.escape(fallback)}</tg-time>'
+
+
+def _progress_bar(seconds_left: float, total_seconds: float) -> str:
+    # Тот же вид [████░░░░░░], что у таймеров промо-предложений (app/utils/promo_offer.py).
+    if total_seconds <= 0:
+        total_seconds = seconds_left or 1
+    ratio = max(0.0, min(1.0, seconds_left / total_seconds))
+    filled = int(round(ratio * _PROGRESS_BAR_LENGTH))
+    filled = max(0, min(_PROGRESS_BAR_LENGTH, filled))
+    if filled == 0 and seconds_left > 0:
+        filled = 1
+    return f'[{"█" * filled}{"░" * (_PROGRESS_BAR_LENGTH - filled)}]'
 
 
 def _rich_status_label(texts, actual_status: str, is_trial: bool) -> str:
@@ -411,8 +424,79 @@ def _build_subscriptions_table(subscriptions, texts) -> str:
 
 
 async def _build_single_subscription_block(user: User, texts, db: AsyncSession) -> str:
+    # CUSTOM_RICH_MENU_ENABLED=True → кастомный блок форка (см. _build_single_subscription_block_custom).
+    # False → дословная версия разработчика (origin/main) ниже. Тумблер в «Управление ботом»
+    # (категория «Кастомный интерфейс»). Держим тело разработчика неизменным, чтобы pull из
+    # upstream мёржился без конфликтов — расходимся только на этой развилке.
+    if settings.CUSTOM_RICH_MENU_ENABLED:
+        return await _build_single_subscription_block_custom(user, texts, db)
+
     # Статусные строки берём из того же builder-а, что и классическое меню, —
     # единый источник правды для формулировок (см. tests/test_start_menu_text_consistency.py).
+    from app.handlers.menu import _get_subscription_status
+
+    subscription = getattr(user, 'subscription', None)
+    if not subscription:
+        return f'<p>{html.escape(texts.t("SUB_STATUS_NONE", "❌ Отсутствует"))}</p>'
+
+    is_daily_tariff = False
+    tariff_line = ''
+    if settings.is_tariffs_mode() and subscription.tariff_id:
+        try:
+            tariff = await get_tariff_by_id(db, subscription.tariff_id)
+        except Exception as error:
+            tariff = None
+            logger.debug('Не удалось загрузить тариф для rich-меню', error=str(error))
+        if tariff:
+            is_daily_tariff = bool(getattr(tariff, 'is_daily', False))
+            tariff_template = texts.t('MAIN_MENU_RICH_TARIFF', '📦 Тариф: {tariff}')
+            tariff_line = html.escape(tariff_template).replace('{tariff}', f'<b>{html.escape(tariff.name)}</b>')
+
+    status_text = _get_subscription_status(user, texts, is_daily_tariff)
+    lines = [html.escape(line) for line in status_text.split('\n') if line.strip()]
+    if tariff_line:
+        lines.append(tariff_line)
+
+    current_time = datetime.now(UTC)
+    end_date = getattr(subscription, 'end_date', None)
+    start_date = getattr(subscription, 'start_date', None)
+    actual_status = (subscription.actual_status or '').lower()
+    if not is_daily_tariff and end_date and end_date > current_time and actual_status in {'active', 'trial'}:
+        seconds_left = (end_date - current_time).total_seconds()
+        total_seconds = (end_date - start_date).total_seconds() if start_date else 0
+        relative_template = texts.t('MAIN_MENU_RICH_EXPIRES_RELATIVE', '⏳ истекает {when}')
+        days_left_text = texts.t('MAIN_MENU_RICH_DAYS_LEFT', 'осталось {days} дн.').replace(
+            '{days}', str(max((end_date - current_time).days, 0))
+        )
+        relative_line = html.escape(relative_template).replace('{when}', _tg_time(end_date, 'r', days_left_text))
+        lines.append(f'<code>{_progress_bar(seconds_left, total_seconds)}</code> {relative_line}')
+
+    if actual_status in {'active', 'trial', 'limited'}:
+        traffic_template = texts.t('MAIN_MENU_RICH_TRAFFIC', '📊 Трафик: {traffic}')
+        lines.append(
+            html.escape(traffic_template).replace('{traffic}', html.escape(_traffic_usage_text(subscription, texts)))
+        )
+        device_limit = getattr(subscription, 'device_limit', None)
+        if device_limit:
+            devices_template = texts.t('MAIN_MENU_RICH_DEVICES', '📱 Устройства: {devices}')
+            lines.append(html.escape(devices_template).replace('{devices}', str(device_limit)))
+        connect_link = _connect_link(subscription, texts)
+        if connect_link:
+            lines.append(connect_link)
+
+    if actual_status == 'expired':
+        renew_link = _renew_link(getattr(subscription, 'id', None), texts)
+        if renew_link:
+            lines.append(renew_link)
+
+    return '<blockquote>' + '<br>'.join(lines) + '</blockquote>'
+
+
+async def _build_single_subscription_block_custom(user: User, texts, db: AsyncSession) -> str:
+    # Кастомный блок подписки форка (тумблер CUSTOM_RICH_MENU_ENABLED). Отличия от версии
+    # разработчика: обёртка <p> вместо <blockquote>, без строки прогресс-бара/относительного
+    # времени, тариф сразу после статуса, строка про безлимитный зарубежный трафик, безлимит
+    # устройств как ∞ (Texts.format_device_limit), премиум-эмодзи через _rich_text.
     from app.handlers.menu import _get_subscription_status
 
     subscription = getattr(user, 'subscription', None)

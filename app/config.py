@@ -341,6 +341,12 @@ class Settings(BaseSettings):
     # Кнопка «Промокод» в главном меню (сам раздел /промокоды не отключает)
     PROMOCODE_BUTTON_VISIBLE: bool = False
 
+    # --- Кастомный интерфейс форка (тумблеры в «Управление ботом»).
+    # True = кастомный вид форка, False = вид разработчика (upstream). ---
+    CUSTOM_RICH_MENU_ENABLED: bool = True
+    CUSTOM_MAIN_MENU_LAYOUT_ENABLED: bool = True
+    CUSTOM_TARIFF_MINIAPP_BUTTON_ENABLED: bool = True
+
     # Режим продаж подписок:
     # - classic: классический режим (выбор серверов, трафика, устройств, периода отдельно)
     # - tariffs: режим тарифов (готовые пакеты с фиксированными параметрами)
