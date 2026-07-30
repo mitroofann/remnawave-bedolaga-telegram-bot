@@ -395,6 +395,7 @@ class MonitoringService:
                 await self._check_trial_expiring_soon(db)
                 await self._check_trial_channel_subscriptions(db)
                 await self._check_expired_subscription_followups(db)
+                await self._check_traffic_limit_squads(db)
                 await self._check_traffic_warnings(db)
                 await self._check_low_balance_alerts(db)
                 await self._retry_stuck_guest_purchases(db)
@@ -2398,6 +2399,64 @@ class MonitoringService:
                 logger.info('Retried stuck pending_activation purchases', retried=retried_pa)
         except Exception:
             logger.error('Error retrying stuck PENDING_ACTIVATION guest purchases', exc_info=True)
+
+    async def _check_traffic_limit_squads(self, db: AsyncSession):
+        """[Форк] Периодический fallback гашения лимит-сквадов (независим от вебхуков/режима).
+
+        Основной путь — вебхук user.limited. Но вебхук может не приходить (не настроен,
+        лаг, single-tariff sync его не трогает), а панель уже режет юзера. Здесь ловим
+        «трафик исчерпан + тариф настроен на гашение + ещё не погашено» и гасим сквады,
+        оставляя подписку ACTIVE. Идемпотентно: уже погашенные пропускаем.
+        """
+        from app.services import traffic_limit_squad_service as _tls
+
+        if not _tls.is_enabled():
+            return
+
+        try:
+            from sqlalchemy import select
+            from sqlalchemy.orm import selectinload
+
+            from app.database.models import Subscription
+
+            result = await db.execute(
+                select(Subscription)
+                .options(selectinload(Subscription.tariff))
+                .where(
+                    Subscription.status.in_(['active', 'trial']),
+                    Subscription.traffic_limit_gb > 0,
+                )
+            )
+            subscriptions = result.scalars().all()
+
+            disabled_count = 0
+            for subscription in subscriptions:
+                # Уже погашено — пропускаем (идемпотентность).
+                if _tls.has_disabled_squads(subscription):
+                    continue
+                # Трафик действительно исчерпан?
+                limit = subscription.traffic_limit_gb or 0
+                used = subscription.traffic_used_gb or 0.0
+                if limit <= 0 or used < limit - 0.01:
+                    continue
+                # Тариф настроен на гашение и есть что гасить?
+                if not _tls.squads_to_disable(subscription):
+                    continue
+
+                try:
+                    if await _tls.disable_for_subscription_id(db, subscription.id):
+                        disabled_count += 1
+                except Exception as disable_err:
+                    logger.error(
+                        'traffic-limit-squad: ошибка гашения в мониторинге',
+                        subscription_id=subscription.id,
+                        error=disable_err,
+                    )
+
+            if disabled_count:
+                logger.info('traffic-limit-squad: погашено сквадов в мониторинге', count=disabled_count)
+        except Exception as e:
+            logger.error('Ошибка проверки лимит-сквадов трафика', error=e)
 
     async def _check_traffic_warnings(self, db: AsyncSession):
         """Check subscriptions approaching traffic limit and notify users."""
