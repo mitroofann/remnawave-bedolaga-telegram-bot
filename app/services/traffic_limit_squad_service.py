@@ -21,6 +21,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -270,6 +272,56 @@ async def disable_for_subscription_id(db: AsyncSession, subscription_id: int) ->
 
     user = await get_user_by_id(db, subscription.user_id)
     return await disable_squads_on_limit(db, user, subscription)
+
+
+def _resolve_reset_mode(subscription: Subscription) -> str:
+    """Режим сброса трафика подписки: из тарифа, иначе глобальный дефолт (обычно MONTH)."""
+    tariff = getattr(subscription, 'tariff', None)
+    mode = getattr(tariff, 'traffic_reset_mode', None) if tariff is not None else None
+    if not mode:
+        mode = getattr(settings, 'DEFAULT_TRAFFIC_RESET_STRATEGY', 'MONTH')
+    return (mode or 'MONTH').upper()
+
+
+def days_until_traffic_reset(subscription: Subscription, *, now: datetime | None = None) -> int | None:
+    """Сколько полных дней до следующего сброса трафика по режиму тарифа.
+
+    Трафик сбрасывается НЕ в конце подписки, а по циклу из тарифа (traffic_reset_mode):
+    - DAY — каждый день (00:00 UTC);
+    - WEEK — в начале недели (понедельник 00:00 UTC);
+    - MONTH — 1-го числа календарного месяца (00:00 UTC);
+    - MONTH_ROLLING — каждые 30 дней от start_date (приближение: точную дату первого
+      подключения бот не хранит, панель считает от неё);
+    - NO_RESET — сброса нет → возвращаем None (вызывающий подставит срок подписки).
+
+    Возвращает число дней (>=0) или None для NO_RESET.
+    """
+    if now is None:
+        now = datetime.now(UTC)
+    mode = _resolve_reset_mode(subscription)
+
+    if mode == 'NO_RESET':
+        return None
+
+    if mode == 'MONTH_ROLLING':
+        start = getattr(subscription, 'start_date', None) or now
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=UTC)
+        elapsed_days = max((now - start).days, 0)
+        return 30 - (elapsed_days % 30)
+
+    if mode == 'DAY':
+        nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    elif mode == 'WEEK':
+        # Дней до следующего понедельника (0 = сегодня понедельник → берём через неделю).
+        days_ahead = (7 - now.weekday()) % 7 or 7
+        nxt = (now + timedelta(days=days_ahead)).replace(hour=0, minute=0, second=0, microsecond=0)
+    else:  # MONTH: 1-е число следующего месяца
+        year = now.year + (1 if now.month == 12 else 0)
+        month = 1 if now.month == 12 else now.month + 1
+        nxt = now.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    return max((nxt.date() - now.date()).days, 0)
 
 
 async def _push_to_panel(db: AsyncSession, subscription: Subscription, panel_uuid: str, *, enable: bool) -> bool:

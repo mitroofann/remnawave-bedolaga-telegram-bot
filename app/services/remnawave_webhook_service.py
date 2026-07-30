@@ -1222,11 +1222,14 @@ class RemnaWaveWebhookService:
 
         names = await get_servers_display_names(squad_uuids)
 
-        days_left = ''
-        if subscription.end_date:
-            delta = subscription.end_date - datetime.now(UTC)
-            days_left = str(max(delta.days, 0))
-        return {'server_names': names, 'days_left': days_left}
+        # Дни до следующего СБРОСА ТРАФИКА (по циклу тарифа), а не до конца подписки.
+        days = traffic_limit_squad_service.days_until_traffic_reset(subscription)
+        if days is None:
+            # NO_RESET: сброса по циклу нет — показываем срок до конца подписки.
+            days = 0
+            if subscription.end_date:
+                days = max((subscription.end_date - datetime.now(UTC)).days, 0)
+        return {'server_names': names, 'days_left': str(days)}
 
     async def _handle_user_traffic_reset(
         self, db: AsyncSession, user: User, subscription: Subscription | None, data: dict

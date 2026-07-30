@@ -4,6 +4,7 @@
 восстановление полей) и асинхронные disable/restore с замоканными БД и панелью.
 """
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,6 +28,7 @@ def _make_subscription(**kwargs):
         traffic_limit_panel_bytes=None,
         tariff=SimpleNamespace(limit_disabled_squads=['sq-lte']),
         end_date=None,
+        start_date=None,
     )
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
@@ -78,6 +80,65 @@ def test_panel_limit_is_unlimited_while_disabled():
 def test_panel_limit_unlimited_tariff():
     sub = _make_subscription(traffic_limit_gb=0)
     assert svc.panel_traffic_limit_bytes(sub) == 0
+
+
+# ---------- days_until_traffic_reset ----------
+
+
+def _sub_with_mode(mode, start=None):
+    return _make_subscription(
+        tariff=SimpleNamespace(limit_disabled_squads=['sq-lte'], traffic_reset_mode=mode),
+        start_date=start,
+    )
+
+
+def test_reset_days_day_mode():
+    # DAY: сброс каждую полночь → сегодня остаётся 1 день до следующего сброса.
+    now = datetime(2026, 7, 15, 10, 0, tzinfo=UTC)
+    assert svc.days_until_traffic_reset(_sub_with_mode('DAY'), now=now) == 1
+
+
+def test_reset_days_month_mode_midmonth():
+    # MONTH: 1-е число следующего месяца. 15 июля → до 1 августа 17 дней.
+    now = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
+    assert svc.days_until_traffic_reset(_sub_with_mode('MONTH'), now=now) == 17
+
+
+def test_reset_days_month_mode_december_rollover():
+    # MONTH через границу года: 20 дек → до 1 января 12 дней.
+    now = datetime(2026, 12, 20, 0, 0, tzinfo=UTC)
+    assert svc.days_until_traffic_reset(_sub_with_mode('MONTH'), now=now) == 12
+
+
+def test_reset_days_week_mode():
+    # WEEK: следующий понедельник. 2026-07-15 — среда (weekday=2) → до пн 20-го 5 дней.
+    now = datetime(2026, 7, 15, 9, 0, tzinfo=UTC)
+    assert svc.days_until_traffic_reset(_sub_with_mode('WEEK'), now=now) == 5
+
+
+def test_reset_days_week_mode_on_monday():
+    # Понедельник → следующий сброс через неделю (не сегодня).
+    now = datetime(2026, 7, 13, 9, 0, tzinfo=UTC)  # понедельник
+    assert svc.days_until_traffic_reset(_sub_with_mode('WEEK'), now=now) == 7
+
+
+def test_reset_days_month_rolling():
+    # MONTH_ROLLING: 30-дневные циклы от start_date. Прошло 10 дней → осталось 20.
+    start = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
+    now = datetime(2026, 7, 11, 0, 0, tzinfo=UTC)
+    assert svc.days_until_traffic_reset(_sub_with_mode('MONTH_ROLLING', start=start), now=now) == 20
+
+
+def test_reset_days_no_reset_returns_none():
+    now = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
+    assert svc.days_until_traffic_reset(_sub_with_mode('NO_RESET'), now=now) is None
+
+
+def test_reset_days_defaults_to_month_when_mode_absent():
+    # Тариф без traffic_reset_mode → глобальный дефолт (MONTH).
+    now = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
+    sub = _make_subscription(tariff=SimpleNamespace(limit_disabled_squads=['sq-lte'], traffic_reset_mode=None))
+    assert svc.days_until_traffic_reset(sub, now=now) == 17
 
 
 # ---------- apply_restore_fields ----------
