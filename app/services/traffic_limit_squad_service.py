@@ -221,6 +221,48 @@ async def restore_squads(db: AsyncSession, subscription: Subscription, *, reason
     return True
 
 
+def should_disable_on_panel_limit(subscription: Subscription) -> bool:
+    """Пред-проверка (без I/O) для sync-путей: применять фичу вместо флипа в LIMITED?
+
+    Используется там, где статус LIMITED приходит НЕ через вебхук, а через синхронизацию
+    с панелью (remnawave_service). Если True — sync не должен ставить LIMITED, а гашение
+    сквадов выполняется отдельно (inline или после батч-коммита) через
+    ``disable_for_subscription_id`` / ``disable_squads_on_limit``.
+
+    True когда: фича включена И (сквады уже погашены — не трогаем статус | есть что гасить).
+    """
+    if not is_enabled():
+        return False
+    if has_disabled_squads(subscription):
+        # Уже погашены — панель может ещё догонять и слать LIMITED; статус не трогаем.
+        return True
+    return bool(squads_to_disable(subscription))
+
+
+async def disable_for_subscription_id(db: AsyncSession, subscription_id: int) -> bool:
+    """Догрузить подписку (+тариф, +юзер) по id и погасить лимит-сквады.
+
+    Точка входа для sync-путей: батч собирает id кандидатов в цикле и обрабатывает их
+    ПОСЛЕ финального commit (панельный push нельзя делать в середине батча). used-байты
+    берём из уже синхронизированного ``traffic_used_gb``, чтобы не дёргать панель повторно.
+    """
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from app.database.crud.user import get_user_by_id
+
+    result = await db.execute(
+        select(Subscription).where(Subscription.id == subscription_id).options(selectinload(Subscription.tariff))
+    )
+    subscription = result.scalar_one_or_none()
+    if subscription is None:
+        return False
+
+    user = await get_user_by_id(db, subscription.user_id)
+    used_bytes = int((subscription.traffic_used_gb or 0) * _BYTES_PER_GB)
+    return await disable_squads_on_limit(db, user, subscription, used_bytes=used_bytes)
+
+
 async def _fetch_used_bytes(panel_uuid: str) -> int:
     """Прочитать текущий использованный трафик юзера с панели (fallback, если не в вебхуке)."""
     try:

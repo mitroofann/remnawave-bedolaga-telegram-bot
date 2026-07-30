@@ -9,26 +9,46 @@
 лого `stable_logo.png` (старое) и `bulka_logo.png` (новое Bulka VPN) лежат рядом с `index.html`.
 Если адреса поменяются — правь ссылки в конце `index.html`.
 
-## Отдача через Caddy
+## ⚠️ Важно: держать заглушку ВНЕ `dist` кабинета
 
-Скопируй папку на сервер (напр. в `/srv/stub-site`) и в Caddyfile замени блок
-старого кабинета на отдачу статики:
+Раньше заглушка лежала в `/opt/bedolaga-cabinet/dist/stub-page/`. Это ошибка: `npm run build`
+(vite) при пересборке **очищает `dist/` целиком** и удаляет заглушку → `cabinet.stable-vpn.net`
+отдаёт 404. Поэтому заглушку отдаём напрямую из этой папки репозитория (`/opt/bulka-bot/stub-site`),
+которая обновляется через `git pull` и никогда не затрагивается сборкой кабинета.
 
-```
-cabinet.stable-vpn.net {
-    root * /srv/stub-site
-    file_server
-}
-```
+## Отдача через Caddy (финальная схема)
 
-Перезапусти Caddy:
-```
-docker exec <caddy> caddy validate --config /etc/caddy/Caddyfile
-docker exec <caddy> caddy reload --config /etc/caddy/Caddyfile
-```
+Заглушка живёт в `/opt/bulka-bot/stub-site` (этот каталог). Монтируем его в контейнер Caddy
+и отдаём как статику.
 
-После этого контейнер старого кабинета можно остановить (`docker compose stop <cabinet>`) —
-страницу отдаёт сам Caddy.
+1. В `docker-compose.yml` Caddy (`/opt/caddy/docker-compose.yml`) добавить том (ro):
+
+   ```yaml
+   volumes:
+     - /opt/bulka-bot/stub-site:/srv/stub-site:ro
+   ```
+
+2. В `Caddyfile` (`/opt/caddy/Caddyfile`) блок старого кабинета:
+
+   ```
+   cabinet.stable-vpn.net {
+       root * /srv/stub-site
+       try_files {path} /index.html
+       file_server
+   }
+   ```
+
+3. Применить:
+
+   ```bash
+   cd /opt/caddy
+   docker compose up -d            # подхватит новый том
+   docker exec <caddy> caddy validate --config /etc/caddy/Caddyfile
+   docker exec <caddy> caddy reload --config /etc/caddy/Caddyfile
+   ```
+
+После этого обновление заглушки = `git pull` в `/opt/bulka-bot` (файлы в `stub-site/`
+обновятся, Caddy отдаёт их напрямую). `npm run build` кабинета заглушку больше не трогает.
 
 > Новый `cabinet.bulkavpn.net` настраивается отдельно на основной (новый) кабинет.
 > Старый домен держим на заглушке столько, сколько нужно.

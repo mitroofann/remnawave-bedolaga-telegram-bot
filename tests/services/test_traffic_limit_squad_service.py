@@ -109,6 +109,32 @@ def _fake_db():
     return db
 
 
+# ---------- should_disable_on_panel_limit (sync-развилка) ----------
+
+
+def test_should_disable_true_when_squads_to_disable(monkeypatch):
+    monkeypatch.setattr(svc, 'is_enabled', lambda: True)
+    assert svc.should_disable_on_panel_limit(_make_subscription()) is True
+
+
+def test_should_disable_true_when_already_disabled(monkeypatch):
+    # Панель ещё догоняет и шлёт LIMITED, но сквады уже сняты — статус не трогаем.
+    monkeypatch.setattr(svc, 'is_enabled', lambda: True)
+    sub = _make_subscription(connected_squads=['sq-eu'], traffic_limit_disabled_squads=['sq-lte'])
+    assert svc.should_disable_on_panel_limit(sub) is True
+
+
+def test_should_disable_false_when_feature_off(monkeypatch):
+    monkeypatch.setattr(svc, 'is_enabled', lambda: False)
+    assert svc.should_disable_on_panel_limit(_make_subscription()) is False
+
+
+def test_should_disable_false_when_tariff_not_configured(monkeypatch):
+    monkeypatch.setattr(svc, 'is_enabled', lambda: True)
+    sub = _make_subscription(tariff=SimpleNamespace(limit_disabled_squads=[]))
+    assert svc.should_disable_on_panel_limit(sub) is False
+
+
 @pytest.mark.anyio
 async def test_disable_squads_moves_squad_and_raises_limit(monkeypatch):
     monkeypatch.setattr(svc, 'is_enabled', lambda: True)

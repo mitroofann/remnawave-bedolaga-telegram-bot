@@ -1990,6 +1990,10 @@ class RemnaWaveService:
             )
 
             # Match and update
+            # [Форк] Подписки, которым вместо LIMITED нужно погасить лимит-сквады.
+            # Собираем в цикле, обрабатываем ПОСЛЕ финального commit (панельный push
+            # нельзя делать в середине батча). См. traffic_limit_squad_service.
+            limit_squad_candidates: list[int] = []
             for panel_user in panel_users:
                 panel_uuid = panel_user.get('uuid')
                 if not panel_uuid:
@@ -2164,9 +2168,19 @@ class RemnaWaveService:
                                 SubscriptionStatus.ACTIVE.value,
                                 SubscriptionStatus.TRIAL.value,
                             ):
-                                subscription.status = SubscriptionStatus.LIMITED.value
-                                subscription.grace_candidate_reason = 'limited'
-                                subscription.grace_candidate_at = now
+                                # [Форк] Фича гашения сквада: вместо LIMITED — снять
+                                # настроенные в тарифе сквады, оставив подписку ACTIVE.
+                                from app.services import traffic_limit_squad_service as _tls
+
+                                if _tls.should_disable_on_panel_limit(subscription):
+                                    if not _tls.has_disabled_squads(subscription):
+                                        # Отложенная обработка после батч-коммита.
+                                        limit_squad_candidates.append(subscription.id)
+                                    # Статус НЕ трогаем — остаётся ACTIVE.
+                                else:
+                                    subscription.status = SubscriptionStatus.LIMITED.value
+                                    subscription.grace_candidate_reason = 'limited'
+                                    subscription.grace_candidate_at = now
                         elif panel_status == 'EXPIRED' and subscription.end_date:
                             local_end = self._local_to_utc(subscription.end_date)
                             if local_end <= now and subscription.status in (
@@ -2202,8 +2216,13 @@ class RemnaWaveService:
                                 _squad_uuids.append(_sq['uuid'])
                             elif isinstance(_sq, str):
                                 _squad_uuids.append(_sq)
+                    # [Форк] Не синхронизируем connected_squads пока сквады погашены по
+                    # лимиту (панель может отдать полный список из-за лага применения).
+                    from app.services import traffic_limit_squad_service as _tls_sq2
+
                     if (
                         not grace_open
+                        and not _tls_sq2.has_disabled_squads(subscription)
                         and _squad_uuids
                         and set(_squad_uuids) != set(subscription.connected_squads or [])
                     ):
@@ -2219,6 +2238,21 @@ class RemnaWaveService:
                     stats['errors'] += 1
 
             await db.commit()
+
+            # [Форк] Пост-обработка кандидатов на гашение лимит-сквадов (после commit,
+            # чтобы панельный push шёл вне батч-транзакции). Каждый вызов сам коммитит.
+            if limit_squad_candidates:
+                from app.services import traffic_limit_squad_service as _tls
+
+                for _sub_id in limit_squad_candidates:
+                    try:
+                        await _tls.disable_for_subscription_id(db, _sub_id)
+                    except Exception as _tls_err:
+                        logger.error(
+                            'traffic-limit-squad: ошибка гашения сквадов в sync',
+                            subscription_id=_sub_id,
+                            error=_tls_err,
+                        )
 
             logger.info(
                 '🎯 [multi-tariff] Синхронизация завершена',
@@ -2408,7 +2442,15 @@ class RemnaWaveService:
             elif panel_status == 'ACTIVE' and end_date_utc > current_time:
                 new_status = SubscriptionStatus.ACTIVE.value
             elif panel_status == 'LIMITED':
-                new_status = SubscriptionStatus.LIMITED.value
+                # [Форк] Если тариф настроен на гашение сквадов при лимите — НЕ флипаем в
+                # LIMITED: подписка остаётся ACTIVE, а сквады гасит вебхук/батч-sync
+                # (traffic_limit_squad_service). Иначе — штатный LIMITED.
+                from app.services import traffic_limit_squad_service as _tls
+
+                if _tls.should_disable_on_panel_limit(subscription):
+                    new_status = subscription.status
+                else:
+                    new_status = SubscriptionStatus.LIMITED.value
             elif panel_status == 'DISABLED':
                 new_status = SubscriptionStatus.DISABLED.value
             elif end_date_utc <= current_time:
@@ -2458,8 +2500,15 @@ class RemnaWaveService:
                     elif isinstance(squad, str):
                         panel_squad_uuids.append(squad)
 
+            # [Форк] Пока сквады погашены по лимиту трафика — не синхронизируем
+            # connected_squads из панели: панель может отдать полный список (лаг
+            # применения) и «вернуть» погашенный сквад, рассинхронив с
+            # traffic_limit_disabled_squads. Восстановление идёт своим путём.
+            from app.services import traffic_limit_squad_service as _tls_sq
+
             if (
                 not grace_open
+                and not _tls_sq.has_disabled_squads(subscription)
                 and panel_squad_uuids
                 and set(panel_squad_uuids) != set(subscription.connected_squads or [])
             ):
