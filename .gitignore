@@ -49,6 +49,12 @@
 !.github/
 !.github/**
 
+# Заглушки на время ребрендинга (Stable VPN → Bulka VPN)
+!stable-stub-bot/
+!stable-stub-bot/**
+!stub-site/
+!stub-site/**
+
 # ========== BLACKLIST: игнорируемые внутри папок ==========
 
 # Python

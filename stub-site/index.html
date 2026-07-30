@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stable VPN → Bulka VPN</title>
+<meta name="robots" content="noindex">
+<!--
+  Страница-заглушка старого кабинета (cabinet.stable-vpn.net) после ребрендинга.
+  Самодостаточный HTML: инлайн-CSS, без внешних зависимостей.
+  Настроено: новый сайт https://cabinet.bulkavpn.net, бот https://t.me/vpnbulka_bot.
+  Ассеты рядом: stable_logo.png (старое лого), bulka_logo.png (новое лого Bulka VPN).
+-->
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #0a1020;
+    --bg2: #0f1830;
+    --card: rgba(255,255,255,0.04);
+    --border: rgba(120,170,255,0.18);
+    --accent: #3aa0ff;
+    --accent2: #7fd6ff;
+    --text: #eaf2ff;
+    --muted: #9fb3d1;
+  }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background:
+      radial-gradient(1200px 600px at 50% -10%, #14213f 0%, rgba(20,33,63,0) 60%),
+      linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
+    color: var(--text);
+    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    padding: 40px 20px 60px;
+  }
+  .top-logo {
+    width: 96px; height: 96px;
+    border-radius: 22px;
+    object-fit: cover;
+    box-shadow: 0 8px 40px rgba(58,160,255,0.35);
+    margin-bottom: 28px;
+  }
+  .card {
+    width: 100%;
+    max-width: 460px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 24px;
+    padding: 40px 28px 32px;
+    text-align: center;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 20px 60px rgba(0,0,0,0.45);
+  }
+  .badge {
+    display: inline-block;
+    font-size: 13px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--accent2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 6px 14px;
+    margin-bottom: 22px;
+  }
+  h1 {
+    font-size: 26px;
+    line-height: 1.25;
+    margin-bottom: 14px;
+    font-weight: 700;
+  }
+  h1 .old { color: var(--muted); font-weight: 600; }
+  h1 .new {
+    /* Золотистый «булочный» акцент бренда Bulka VPN */
+    background: linear-gradient(90deg, #f4b642, #ffd98a);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  p.lead { color: var(--muted); font-size: 15px; line-height: 1.6; margin-bottom: 28px; }
+  .bulka-logo {
+    /* og.png — широкий баннер 1200×630, показываем целиком во всю ширину карточки */
+    width: 100%;
+    height: auto;
+    border-radius: 16px;
+    display: block;
+    margin: 4px auto 28px;
+    box-shadow: 0 10px 40px rgba(244,182,66,0.25);
+  }
+  .btns { display: flex; flex-direction: column; gap: 12px; }
+  .btn {
+    display: block;
+    text-decoration: none;
+    font-size: 16px;
+    font-weight: 600;
+    padding: 15px 20px;
+    border-radius: 14px;
+    transition: transform .06s ease, filter .2s ease;
+  }
+  .btn:active { transform: translateY(1px); }
+  .btn-primary {
+    color: #2a1a04;
+    background: linear-gradient(90deg, #f4b642, #ffd98a);
+    box-shadow: 0 8px 30px rgba(244,182,66,0.4);
+  }
+  .btn-primary:hover { filter: brightness(1.06); }
+  .btn-secondary {
+    color: var(--text);
+    background: transparent;
+    border: 1px solid var(--border);
+  }
+  .btn-secondary:hover { background: rgba(120,170,255,0.08); }
+  .foot { margin-top: 26px; font-size: 12px; color: var(--muted); }
+  @media (max-width: 400px) {
+    h1 { font-size: 22px; }
+    .card { padding: 32px 20px 26px; }
+  }
+</style>
+</head>
+<body>
+  <!-- СТАРОЕ лого сверху (синий щит) -->
+  <img class="top-logo" src="stable_logo.png" alt="Stable VPN">
+
+  <div class="card">
+    <span class="badge">Ребрендинг</span>
+    <h1><span class="old">Stable VPN переехал —</span><br>теперь мы <span class="new">Bulka VPN</span> 🥐</h1>
+    <p class="lead">
+      Ваша подписка, баланс и все настройки перенесены автоматически.
+      Просто перейдите на новый сайт или в новый бот и войдите — всё на месте.
+    </p>
+
+    <!-- НОВОЕ лого Bulka VPN -->
+    <img class="bulka-logo" src="bulka_logo.png" alt="Bulka VPN">
+
+    <div class="btns">
+      <a class="btn btn-primary" href="https://cabinet.bulkavpn.net">Перейти на новый сайт</a>
+      <a class="btn btn-secondary" href="https://t.me/vpnbulka_bot">Открыть бота в Telegram</a>
+    </div>
+
+    <div class="foot">© Bulka VPN</div>
+  </div>
+</body>
+</html>

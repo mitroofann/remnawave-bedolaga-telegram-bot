@@ -1,0 +1,16 @@
+services:
+  stub-bot:
+    build: .
+    container_name: stable_stub_bot
+    restart: unless-stopped
+    env_file: .env
+    # Если БД основного бота в другой docker-сети — подключи её здесь,
+    # иначе /broadcast не достучится до postgres. Пример:
+    # networks:
+    #   - remnawave_default
+    volumes:
+      - ./assets:/app/assets:ro
+
+# networks:
+#   remnawave_default:
+#     external: true
