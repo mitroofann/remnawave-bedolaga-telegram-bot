@@ -12,6 +12,7 @@ from app.config import settings
 from app.database.crud.server_squad import get_all_server_squads
 from app.database.crud.user import get_user_by_id
 from app.database.models import Subscription, SubscriptionStatus, User
+from app.services import traffic_limit_squad_service
 from app.external.remnawave_api import (
     RemnaWaveAPI,
     RemnaWaveAPIError,
@@ -573,6 +574,18 @@ class SubscriptionService:
             except Exception:
                 pass  # tariff может быть None или уже загружен
 
+            # [Форк] Сброс трафика с синхронизацией сквадов (покупка/продление/смена тарифа/
+            # ручной сброс) = момент вернуть сквады, погашенные по лимиту. Восстанавливаем поля
+            # ДО формирования payload: connected_squads уйдёт полным, лимит — тарифным (гард
+            # panel_traffic_limit_bytes вернёт тарифный, т.к. маркер уже очищен).
+            if reset_traffic and sync_squads and traffic_limit_squad_service.has_disabled_squads(subscription):
+                traffic_limit_squad_service.apply_restore_fields(subscription)
+                logger.info(
+                    'traffic-limit-squad: сквады восстановлены при reset_traffic',
+                    subscription_id=subscription.id,
+                    reason=reset_reason,
+                )
+
             current_time = datetime.now(UTC)
             # Определяем актуальный статус для отправки в RemnaWave
             # НЕ меняем статус подписки здесь - это задача scheduled job
@@ -607,7 +620,9 @@ class SubscriptionService:
                     expire_at=subscription.end_date
                     if is_actually_active
                     else max(subscription.end_date, current_time + timedelta(minutes=1)),
-                    traffic_limit_bytes=self._gb_to_bytes(subscription.traffic_limit_gb),
+                    # [Форк] пока сквады погашены по лимиту трафика — держим поднятый
+                    # панельный лимит (used+буфер), иначе панель снова выбьет в LIMITED.
+                    traffic_limit_bytes=traffic_limit_squad_service.panel_traffic_limit_bytes(subscription),
                     traffic_limit_strategy=get_traffic_reset_strategy(subscription.tariff),
                     telegram_id=user.telegram_id,
                     email=user.email,

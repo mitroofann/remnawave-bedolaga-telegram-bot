@@ -61,6 +61,7 @@ from app.services.notification_delivery_service import (
 )
 from app.services.notification_settings_service import NotificationSettingsService
 from app.services.promo_offer_service import promo_offer_service
+from app.services import traffic_limit_squad_service
 from app.services.subscription_service import SubscriptionService, get_traffic_reset_strategy
 from app.utils.cache import cache
 from app.utils.message_patch import caption_exceeds_telegram_limit
@@ -661,7 +662,10 @@ class MonitoringService:
                     # _gb_to_bytes живёт в SubscriptionService — у MonitoringService своего
                     # никогда не было, и self._gb_to_bytes ронял весь метод AttributeError-ом
                     # ещё до запроса в панель (молча гасился общим except → return None).
-                    traffic_limit_bytes=self.subscription_service._gb_to_bytes(subscription.traffic_limit_gb),
+                    # [Форк] пока сквады погашены по лимиту трафика — пушим поднятый панельный
+                    # лимит (used+буфер), иначе рутинный sync вернёт тарифный лимит и панель
+                    # снова выбьет юзера в LIMITED (зацикливание).
+                    traffic_limit_bytes=traffic_limit_squad_service.panel_traffic_limit_bytes(subscription),
                     traffic_limit_strategy=get_traffic_reset_strategy(subscription.tariff),
                     description=settings.format_remnawave_user_description(
                         full_name=user.full_name, username=user.username, telegram_id=user.telegram_id

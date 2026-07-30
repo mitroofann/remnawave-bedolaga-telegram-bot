@@ -202,6 +202,7 @@ async def create_tariff(
     traffic_reset_mode: str | None = None,  # DAY, WEEK, MONTH, MONTH_ROLLING, NO_RESET, None = глобальная настройка
     # Внешний сквад RemnaWave
     external_squad_uuid: str | None = None,
+    limit_disabled_squads: list[str] | None = None,
 ) -> Tariff:
     """Создает новый тариф."""
     normalized_prices = _normalize_period_prices(period_prices)
@@ -243,6 +244,8 @@ async def create_tariff(
         traffic_reset_mode=traffic_reset_mode,
         # Внешний сквад
         external_squad_uuid=external_squad_uuid,
+        # [Форк] Сквады, гасимые при исчерпании трафика
+        limit_disabled_squads=limit_disabled_squads or [],
     )
 
     db.add(tariff)
@@ -314,6 +317,8 @@ async def update_tariff(
     traffic_reset_mode: str | None = ...,  # ... = не передан, None = сбросить к глобальной настройке
     # Внешний сквад RemnaWave
     external_squad_uuid: str | None = ...,  # ... = не передан, None = убрать внешний сквад
+    # [Форк] Сквады, гасимые при исчерпании трафика
+    limit_disabled_squads: list[str] | None = None,
 ) -> Tariff:
     """Обновляет существующий тариф."""
     if name is not None:
@@ -389,6 +394,9 @@ async def update_tariff(
     # Внешний сквад
     if external_squad_uuid is not ...:
         tariff.external_squad_uuid = external_squad_uuid
+    # [Форк] Сквады, гасимые при исчерпании трафика
+    if limit_disabled_squads is not None:
+        tariff.limit_disabled_squads = limit_disabled_squads
 
     # Обновляем промогруппы если указаны
     if promo_group_ids is not None:

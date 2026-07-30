@@ -273,6 +273,8 @@ async def get_tariff(
         traffic_reset_mode=tariff.traffic_reset_mode,
         # Внешний сквад
         external_squad_uuid=tariff.external_squad_uuid,
+        # [Форк] Сквады, гасимые при исчерпании трафика
+        limit_disabled_squads=tariff.limit_disabled_squads or [],
         # Показывать в подарках
         show_in_gift=tariff.show_in_gift,
         created_at=tariff.created_at,
@@ -332,6 +334,8 @@ async def create_new_tariff(
         traffic_reset_mode=request.traffic_reset_mode,
         # Внешний сквад
         external_squad_uuid=request.external_squad_uuid,
+        # [Форк] Сквады, гасимые при исчерпании трафика
+        limit_disabled_squads=request.limit_disabled_squads,
         # Показывать в подарках
         show_in_gift=request.show_in_gift,
     )
@@ -432,6 +436,9 @@ async def update_existing_tariff(
     # Внешний сквад (None допускается для сброса)
     if 'external_squad_uuid' in request.model_fields_set:
         updates['external_squad_uuid'] = request.external_squad_uuid
+    # [Форк] Сквады, гасимые при исчерпании трафика
+    if request.limit_disabled_squads is not None:
+        updates['limit_disabled_squads'] = request.limit_disabled_squads
     # Показывать в подарках
     if request.show_in_gift is not None:
         updates['show_in_gift'] = request.show_in_gift

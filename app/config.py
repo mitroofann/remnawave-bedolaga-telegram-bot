@@ -352,6 +352,10 @@ class Settings(BaseSettings):
     CUSTOM_RICH_MENU_ENABLED: bool = True
     CUSTOM_MAIN_MENU_LAYOUT_ENABLED: bool = True
     CUSTOM_TARIFF_MINIAPP_BUTTON_ENABLED: bool = True
+    # При исчерпании трафика гасить настроенные в тарифе сквады (а не переводить в LIMITED):
+    # остальные серверы продолжают работать, подписка остаётся ACTIVE. Сквады возвращаются
+    # при ресете трафика / докупке / смене тарифа. См. traffic_limit_squad_service.
+    CUSTOM_TRAFFIC_LIMIT_SQUAD_ENABLED: bool = True
 
     # Режим продаж подписок:
     # - classic: классический режим (выбор серверов, трафика, устройств, периода отдельно)

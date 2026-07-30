@@ -35,6 +35,7 @@ from app.database.crud.subscription import (
 from app.database.crud.user import get_user_by_id, get_user_by_remnawave_uuid, get_user_by_telegram_id
 from app.database.models import Subscription, SubscriptionServer, SubscriptionStatus, User
 from app.localization.texts import get_texts
+from app.services import traffic_limit_squad_service
 from app.services.admin_notification_service import AdminNotificationService
 from app.services.grace_access_runtime import get_open_grace_subscription_ids, grace_access_runtime
 from app.services.grace_access_service import GraceReason
@@ -51,6 +52,8 @@ _TEXT_KEY_TO_NOTIFICATION_TYPE: dict[str, NotificationType] = {
     'WEBHOOK_SUB_DISABLED': NotificationType.WEBHOOK_SUB_DISABLED,
     'WEBHOOK_SUB_ENABLED': NotificationType.WEBHOOK_SUB_ENABLED,
     'WEBHOOK_SUB_LIMITED': NotificationType.WEBHOOK_SUB_LIMITED,
+    # [Форк] уведомление о гашении сквада при лимите — тот же тип доставки, что и LIMITED.
+    'WEBHOOK_SUB_SQUAD_LIMITED': NotificationType.WEBHOOK_SUB_LIMITED,
     'WEBHOOK_SUB_TRAFFIC_RESET': NotificationType.WEBHOOK_SUB_TRAFFIC_RESET,
     'WEBHOOK_SUB_DELETED': NotificationType.WEBHOOK_SUB_DELETED,
     'WEBHOOK_SUB_REVOKED': NotificationType.WEBHOOK_SUB_REVOKED,
@@ -72,6 +75,8 @@ _TEXT_KEY_TO_SETTING: dict[str, str] = {
     'WEBHOOK_SUB_DISABLED': 'WEBHOOK_NOTIFY_SUB_STATUS',
     'WEBHOOK_SUB_ENABLED': 'WEBHOOK_NOTIFY_SUB_STATUS',
     'WEBHOOK_SUB_LIMITED': 'WEBHOOK_NOTIFY_SUB_LIMITED',
+    # [Форк] управляется тем же тумблером, что и уведомление о лимите трафика.
+    'WEBHOOK_SUB_SQUAD_LIMITED': 'WEBHOOK_NOTIFY_SUB_LIMITED',
     'WEBHOOK_SUB_TRAFFIC_RESET': 'WEBHOOK_NOTIFY_TRAFFIC_RESET',
     'WEBHOOK_SUB_DELETED': 'WEBHOOK_NOTIFY_SUB_DELETED',
     'WEBHOOK_SUB_REVOKED': 'WEBHOOK_NOTIFY_SUB_REVOKED',
@@ -1146,6 +1151,13 @@ class RemnaWaveWebhookService:
             logger.info('Webhook user.limited: подписка не найдена в БД (уже удалена), пропуск', user_id=user.id)
             return
 
+        # [Форк] Фича «гашение сквада при лимите трафика»: вместо перевода в LIMITED
+        # гасим настроенные в тарифе сквады, оставляя остальные серверы работать и
+        # подписку в статусе ACTIVE. Если тариф не настроен / гасить нечего — падаем
+        # в штатную обработку LIMITED ниже.
+        if await self._handle_traffic_limit_squads(db, user, subscription, data):
+            return
+
         candidate_at = datetime.now(UTC)
         subscription.grace_candidate_reason = GraceReason.LIMITED.value
         subscription.grace_candidate_at = candidate_at
@@ -1171,12 +1183,70 @@ class RemnaWaveWebhookService:
             user, 'WEBHOOK_SUB_LIMITED', reply_markup=self._get_traffic_keyboard(user), subscription=subscription
         )
 
+    async def _handle_traffic_limit_squads(
+        self, db: AsyncSession, user: User, subscription: Subscription, data: dict
+    ) -> bool:
+        """[Форк] Погасить лимит-сквады вместо LIMITED. True = обработано (не переводить в LIMITED)."""
+        if not traffic_limit_squad_service.is_enabled():
+            return False
+        if not traffic_limit_squad_service.squads_to_disable(subscription):
+            return False
+
+        # used-трафик из вебхука (nested userTraffic.usedTrafficBytes, fallback плоский ключ);
+        # если нет — сервис сам дочитает с панели.
+        user_traffic = data.get('userTraffic')
+        used_bytes = (
+            user_traffic.get('usedTrafficBytes')
+            if isinstance(user_traffic, dict) and user_traffic.get('usedTrafficBytes') is not None
+            else data.get('usedTrafficBytes')
+        )
+        try:
+            used_bytes = int(used_bytes) if used_bytes is not None else None
+        except (ValueError, TypeError):
+            used_bytes = None
+
+        # Снимок погашенных сквадов ДО применения (для имён в уведомлении).
+        target_squads = traffic_limit_squad_service.squads_to_disable(subscription)
+
+        handled = await traffic_limit_squad_service.disable_squads_on_limit(
+            db, user, subscription, used_bytes=used_bytes
+        )
+        if not handled:
+            return False
+
+        self._stamp_webhook_update(subscription)
+        await self._notify_user(
+            user,
+            'WEBHOOK_SUB_SQUAD_LIMITED',
+            reply_markup=self._get_traffic_keyboard(user),
+            format_kwargs=await self._traffic_limit_squad_format_kwargs(subscription, target_squads),
+            subscription=subscription,
+        )
+        return True
+
+    @staticmethod
+    async def _traffic_limit_squad_format_kwargs(subscription: Subscription, squad_uuids: list[str]) -> dict:
+        """Плейсхолдеры для WEBHOOK_SUB_SQUAD_LIMITED: имена погашенных серверов и дни до сброса."""
+        from app.handlers.subscription.devices import get_servers_display_names
+
+        names = await get_servers_display_names(squad_uuids)
+
+        days_left = ''
+        if subscription.end_date:
+            delta = subscription.end_date - datetime.now(UTC)
+            days_left = str(max(delta.days, 0))
+        return {'server_names': names, 'days_left': days_left}
+
     async def _handle_user_traffic_reset(
         self, db: AsyncSession, user: User, subscription: Subscription | None, data: dict
     ) -> None:
         if not subscription:
             logger.info('Webhook user.traffic_reset: подписка не найдена в БД (уже удалена), пропуск', user_id=user.id)
             return
+
+        # [Форк] вернуть сквады, погашенные по лимиту трафика (сброс по обнулению тарифа/периоду).
+        if traffic_limit_squad_service.has_disabled_squads(subscription):
+            await traffic_limit_squad_service.restore_squads(db, subscription, reason='webhook_traffic_reset')
 
         self._stamp_webhook_update(subscription)
         await update_subscription_usage(db, subscription, 0.0)
@@ -1203,8 +1273,15 @@ class RemnaWaveWebhookService:
         grace_open = subscription.id in await get_open_grace_subscription_ids(db)
 
         # Sync traffic limit
+        # [Форк] пока сквады погашены по лимиту трафика, панельный лимит искусственно поднят
+        # (used+буфер) — не даём ему перезаписать тарифный traffic_limit_gb, иначе в боте
+        # отобразится завышенный лимит вместо тарифного.
         traffic_limit_bytes = data.get('trafficLimitBytes')
-        if traffic_limit_bytes is not None and not grace_open:
+        if (
+            traffic_limit_bytes is not None
+            and not grace_open
+            and not traffic_limit_squad_service.has_disabled_squads(subscription)
+        ):
             try:
                 new_limit_gb = int(traffic_limit_bytes) // (1024**3)
                 if subscription.traffic_limit_gb != new_limit_gb:

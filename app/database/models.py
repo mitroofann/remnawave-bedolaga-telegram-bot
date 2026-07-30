@@ -1907,6 +1907,11 @@ class Tariff(Base):
     # Внешний сквад RemnaWave (UUID) — назначается пользователю при создании подписки
     external_squad_uuid = Column(String(255), nullable=True, default=None)
 
+    # [Форк] Сквады (UUID), которые гасятся у юзера при исчерпании трафика
+    # (CUSTOM_TRAFFIC_LIMIT_SQUAD_ENABLED). Остальные сквады тарифа продолжают работать,
+    # подписка остаётся ACTIVE. Пустой список = гашение не настроено для тарифа.
+    limit_disabled_squads = Column(JSON, default=list)
+
     created_at = Column(AwareDateTime(), default=func.now())
     updated_at = Column(AwareDateTime(), default=func.now(), onupdate=func.now())
 
@@ -2304,6 +2309,17 @@ class Subscription(Base):
     modem_enabled = Column(Boolean, default=False)
 
     connected_squads = Column(JSON, default=list)
+
+    # [Форк] Фича «гашение сквада при лимите трафика» (CUSTOM_TRAFFIC_LIMIT_SQUAD_ENABLED).
+    # Сквады, снятые у юзера из-за исчерпания трафика (перенесены сюда из connected_squads).
+    # Пустой список = фича неактивна для этой подписки. При восстановлении (ресет/докупка/
+    # смена тарифа) сквады возвращаются в connected_squads, поле очищается.
+    traffic_limit_disabled_squads = Column(JSON, default=list)
+    # Поднятый ПАНЕЛЬНЫЙ лимит трафика (в байтах) на время гашения сквада = used + буфер.
+    # Хранится точно, чтобы монитор при каждом синке пушил ровно то же значение и панель не
+    # выбила юзера повторно. subscription.traffic_limit_gb НЕ меняется (в боте видно тарифный
+    # лимит). None = сквады не гасились. См. traffic_limit_squad_service.panel_traffic_limit_bytes.
+    traffic_limit_panel_bytes = Column(BigInteger, nullable=True)
 
     autopay_enabled = Column(Boolean, default=False)
     autopay_days_before = Column(Integer, default=3)

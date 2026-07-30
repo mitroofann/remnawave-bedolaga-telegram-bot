@@ -1343,6 +1343,14 @@ async def extend_subscription(
     if days > 0 and not _housekeeping_done:
         await _housekeep_expired_purchases(db, subscription, now=current_time)
 
+    # [Форк] Продление/смена тарифа = момент вернуть сквады, погашенные по лимиту. Мутируем
+    # только поля (без panel I/O) — последующий push вызывателя (update_remnawave_user,
+    # sync_squads=True по умолчанию) пропагирует полный список сквадов + тарифный лимит.
+    if days > 0:
+        from app.services import traffic_limit_squad_service
+
+        traffic_limit_squad_service.apply_restore_fields(subscription)
+
     subscription.updated_at = current_time
 
     if commit:
@@ -1460,6 +1468,14 @@ async def add_subscription_traffic(db: AsyncSession, subscription: Subscription,
     from app.services.recurrent_amount import sync_recurrent_bindings_after_price_change
 
     await sync_recurrent_bindings_after_price_change(db, subscription.id)
+
+    # [Форк] Докупка трафика — момент вернуть сквады, погашенные по лимиту. Единая choke-точка
+    # для всех входов докупки (бот/miniapp/админка/Web API/автооплата). restore_squads
+    # само-гардируется (мгновенный выход, если гасить нечего) и сам пушит сквады+лимит на панель.
+    from app.services import traffic_limit_squad_service
+
+    if traffic_limit_squad_service.has_disabled_squads(subscription):
+        await traffic_limit_squad_service.restore_squads(db, subscription, reason='traffic_topup')
 
     return subscription
 

@@ -117,6 +117,9 @@ class TariffDetailResponse(BaseModel):
     traffic_reset_mode: str | None = None  # DAY, WEEK, MONTH, MONTH_ROLLING, NO_RESET, None = глобальная настройка
     # Внешний сквад RemnaWave
     external_squad_uuid: str | None = None
+    # [Форк] Сквады (UUID), которые гасятся у юзера при исчерпании трафика
+    # (CUSTOM_TRAFFIC_LIMIT_SQUAD_ENABLED). Подмножество allowed_squads.
+    limit_disabled_squads: list[str] = Field(default_factory=list)
     # Показывать в подарках
     show_in_gift: bool = True
     created_at: datetime
@@ -177,6 +180,8 @@ class TariffCreateRequest(BaseModel):
     traffic_reset_mode: str | None = None  # DAY, WEEK, MONTH, MONTH_ROLLING, NO_RESET, None = глобальная настройка
     # Внешний сквад RemnaWave
     external_squad_uuid: str | None = Field(None, pattern=UUID_PATTERN)
+    # [Форк] Сквады, гасимые при исчерпании трафика (подмножество allowed_squads)
+    limit_disabled_squads: list[str] = Field(default_factory=list, description='Server UUIDs disabled on traffic limit')
     # Показывать в подарках
     show_in_gift: bool = True
 
@@ -219,6 +224,8 @@ class TariffUpdateRequest(BaseModel):
     traffic_reset_mode: str | None = None  # DAY, WEEK, MONTH, MONTH_ROLLING, NO_RESET, None = глобальная настройка
     # Внешний сквад RemnaWave
     external_squad_uuid: str | None = Field(None, pattern=UUID_PATTERN)
+    # [Форк] Сквады, гасимые при исчерпании трафика (подмножество allowed_squads)
+    limit_disabled_squads: list[str] | None = None
     # Показывать в подарках
     show_in_gift: bool | None = None
 

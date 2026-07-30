@@ -381,6 +381,13 @@ async def confirm_reset_traffic(
             async with remnawave_service.get_api_client() as api:
                 await api.reset_user_traffic(remnawave_uuid)
 
+        # [Форк] Платный сброс трафика — вернуть сквады, погашенные по лимиту, сразу (не ждём
+        # user.traffic_reset вебхук). restore_squads само-гардируется и пушит сквады+лимит.
+        from app.services import traffic_limit_squad_service
+
+        if traffic_limit_squad_service.has_disabled_squads(subscription):
+            await traffic_limit_squad_service.restore_squads(db, subscription, reason='manual_traffic_reset')
+
         await create_transaction(
             db=db,
             user_id=db_user.id,
