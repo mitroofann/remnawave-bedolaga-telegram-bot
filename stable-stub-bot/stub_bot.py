@@ -18,7 +18,7 @@ import logging
 import os
 from pathlib import Path
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
@@ -47,9 +47,7 @@ BULKA_BOT_USERNAME = os.environ.get('BULKA_BOT_USERNAME', 'vpnbulka_bot')
 LOGO_PATH = os.environ.get('BULKA_LOGO_PATH', 'assets/bulka_logo.png')
 
 # ID админов через запятую (для /broadcast). Напр. "216332351,161893461".
-ADMIN_IDS = {
-    int(x) for x in os.environ.get('ADMIN_IDS', '').replace(' ', '').split(',') if x.strip().isdigit()
-}
+ADMIN_IDS = {int(x) for x in os.environ.get('ADMIN_IDS', '').replace(' ', '').split(',') if x.strip().isdigit()}
 
 # Строка подключения к ТОЙ ЖЕ БД (нужна только для /broadcast).
 # Формат asyncpg: postgresql://user:pass@host:5432/dbname
@@ -73,9 +71,7 @@ STUB_CAPTION = (
 
 def _keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text='🥐 Открыть Bulka VPN', url=f'https://t.me/{BULKA_BOT_USERNAME}')]
-        ]
+        inline_keyboard=[[InlineKeyboardButton(text='🥐 Открыть Bulka VPN', url=f'https://t.me/{BULKA_BOT_USERNAME}')]]
     )
 
 
@@ -105,16 +101,13 @@ async def cmd_broadcast(message: Message, bot: Bot) -> None:
     await message.answer('📤 Начинаю рассылку по базе…')
     try:
         sent, blocked, failed = await _run_broadcast(bot)
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         logger.exception('Broadcast failed')
         await message.answer(f'❌ Рассылка прервана ошибкой: {error}')
         return
 
     await message.answer(
-        f'✅ Рассылка завершена.\n'
-        f'Отправлено: {sent}\n'
-        f'Заблокировали бота: {blocked}\n'
-        f'Прочие ошибки: {failed}'
+        f'✅ Рассылка завершена.\nОтправлено: {sent}\nЗаблокировали бота: {blocked}\nПрочие ошибки: {failed}'
     )
 
 
@@ -129,7 +122,7 @@ async def any_callback(callback: CallbackQuery) -> None:
     """Нажатия на старые инлайн-кнопки (из старых сообщений) → тоже заглушка."""
     try:
         await callback.answer()
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     if callback.message is not None:
         await _send_stub(callback.message)
@@ -150,7 +143,7 @@ async def _send_stub(message: Message) -> None:
             await message.answer(STUB_CAPTION, reply_markup=kb)
     except TelegramForbiddenError:
         pass  # юзер заблокировал бота — молча пропускаем
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception('Не удалось отправить заглушку')
 
 
@@ -159,14 +152,13 @@ async def _send_stub(message: Message) -> None:
 
 async def _fetch_all_telegram_ids() -> list[int]:
     """Все telegram_id живых пользователей из общей БД (прямой asyncpg, без моделей проекта)."""
-    import asyncpg
+    import asyncpg  # noqa: PLC0415
 
     dsn = DATABASE_URL.replace('+asyncpg', '')  # asyncpg не понимает SQLAlchemy-схему
     conn = await asyncpg.connect(dsn)
     try:
         rows = await conn.fetch(
-            "SELECT telegram_id FROM users "
-            "WHERE telegram_id IS NOT NULL AND (status IS NULL OR status <> 'deleted')"
+            "SELECT telegram_id FROM users WHERE telegram_id IS NOT NULL AND (status IS NULL OR status <> 'deleted')"
         )
     finally:
         await conn.close()
@@ -200,11 +192,11 @@ async def _run_broadcast(bot: Bot) -> tuple[int, int, int]:
                 else:
                     await bot.send_message(tg_id, STUB_CAPTION, reply_markup=kb)
                 sent += 1
-            except Exception:  # noqa: BLE001
+            except Exception:
                 failed += 1
         except TelegramForbiddenError:
             blocked += 1  # юзер заблокировал бота
-        except Exception:  # noqa: BLE001
+        except Exception:
             failed += 1
         await asyncio.sleep(delay)
 

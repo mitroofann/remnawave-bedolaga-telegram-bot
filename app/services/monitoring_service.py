@@ -54,6 +54,7 @@ from app.external.remnawave_api import (
     is_user_not_found_error,
 )
 from app.localization.texts import get_texts
+from app.services import traffic_limit_squad_service
 from app.services.grace_access_runtime import update_panel_user_grace_safe
 from app.services.notification_delivery_service import (
     NotificationType,
@@ -61,7 +62,6 @@ from app.services.notification_delivery_service import (
 )
 from app.services.notification_settings_service import NotificationSettingsService
 from app.services.promo_offer_service import promo_offer_service
-from app.services import traffic_limit_squad_service
 from app.services.subscription_service import SubscriptionService, get_traffic_reset_strategy
 from app.utils.cache import cache
 from app.utils.message_patch import caption_exceeds_telegram_limit

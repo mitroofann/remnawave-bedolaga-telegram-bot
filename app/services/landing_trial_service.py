@@ -95,7 +95,7 @@ async def resolve_landing_trial_params(db: AsyncSession) -> TrialParams:
             tariff_trial_days = getattr(trial_tariff, 'trial_duration_days', None)
             if tariff_trial_days:
                 duration_days = tariff_trial_days
-    except Exception as error:  # noqa: BLE001 — резолв параметров не должен ронять запрос
+    except Exception as error:
         logger.error('resolve_landing_trial_params failed, using settings defaults', error=str(error))
 
     if not squads:
@@ -105,7 +105,7 @@ async def resolve_landing_trial_params(db: AsyncSession) -> TrialParams:
             trial_squad_uuid = await get_random_trial_squad_uuid(db)
             if trial_squad_uuid:
                 squads = [trial_squad_uuid]
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             logger.error('trial squad fallback failed', error=str(error))
 
     return TrialParams(
@@ -213,7 +213,7 @@ async def _provision_trial_subscription(db: AsyncSession, user_id: int, params: 
             async with asyncio.timeout(_REMNAWAVE_SYNC_TIMEOUT):
                 panel_user = await subscription_service.create_remnawave_user(db, subscription)
                 await db.refresh(subscription)
-    except Exception as error:  # noqa: BLE001 — таймаут/сбой панели не роняет выдачу триала
+    except Exception as error:
         logger.error('Failed to create RemnaWave user for landing trial', error=str(error))
 
     # create_remnawave_user глотает RemnaWaveAPIError и возвращает None (не бросает) —
@@ -232,7 +232,7 @@ async def _provision_trial_subscription(db: AsyncSession, user_id: int, params: 
                 subscription_id=subscription.id,
                 user_id=user_id,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception('Failed to enqueue remnawave retry for landing trial')
 
     return subscription

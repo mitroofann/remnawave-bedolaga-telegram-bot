@@ -13,8 +13,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.services.guest_purchase_service import GuestPurchaseError
 from app.services import landing_trial_service as lts
+from app.services.guest_purchase_service import GuestPurchaseError
 
 
 def _landing(trial_enabled: bool = True) -> SimpleNamespace:
@@ -151,8 +151,13 @@ async def test_trial_info_returns_params_when_enabled():
 async def test_start_paid_trial_rejects_when_free():
     db = AsyncMock()
     free_params = lts.TrialParams(
-        duration_days=3, traffic_limit_gb=10, device_limit=2,
-        requires_payment=False, price_kopeks=0, tariff_id=5, squads=[],
+        duration_days=3,
+        traffic_limit_gb=10,
+        device_limit=2,
+        requires_payment=False,
+        price_kopeks=0,
+        tariff_id=5,
+        squads=[],
     )
     with (
         patch.object(lts.settings, 'LANDING_TRIAL_ENABLED', True),
@@ -162,8 +167,11 @@ async def test_start_paid_trial_rejects_when_free():
     ):
         with pytest.raises(GuestPurchaseError) as exc:
             await lts.start_paid_trial(
-                db, _landing(True),
-                contact_type='email', contact_value='a@b.com',
-                payment_method='yookassa', return_url='https://x/{token}',
+                db,
+                _landing(True),
+                contact_type='email',
+                contact_value='a@b.com',
+                payment_method='yookassa',
+                return_url='https://x/{token}',
             )
     assert exc.value.status_code == 400

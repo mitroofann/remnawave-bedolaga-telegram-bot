@@ -184,9 +184,12 @@ async def test_restore_squads_pushes_and_clears(monkeypatch):
 
     monkeypatch.setattr(svc, '_resolve_panel_uuid', lambda sub, user: 'sub-uuid')
 
-    with patch('app.services.subscription_service.SubscriptionService', return_value=fake_service), patch(
-        'app.database.crud.user.get_user_by_id',
-        AsyncMock(return_value=SimpleNamespace(remnawave_uuid='sub-uuid')),
+    with (
+        patch('app.services.subscription_service.SubscriptionService', return_value=fake_service),
+        patch(
+            'app.database.crud.user.get_user_by_id',
+            AsyncMock(return_value=SimpleNamespace(remnawave_uuid='sub-uuid')),
+        ),
     ):
         restored = await svc.restore_squads(db, sub, reason='test')
 

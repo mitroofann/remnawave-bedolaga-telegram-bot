@@ -231,7 +231,7 @@ async def _fetch_used_bytes(panel_uuid: str) -> int:
             panel_user = await api.get_user_by_uuid(panel_uuid)
         if panel_user:
             return int(panel_user.used_traffic_bytes or 0)
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         logger.warning('traffic-limit-squad: не удалось прочитать used_traffic с панели', error=str(error))
     return 0
 
@@ -257,6 +257,6 @@ async def _push_to_panel(db: AsyncSession, subscription: Subscription, panel_uui
         if enable and panel_uuid:
             await service.enable_remnawave_user(panel_uuid, db=db)
         return updated is not None
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         logger.error('traffic-limit-squad: ошибка синхронизации с панелью', error=str(error))
         return False

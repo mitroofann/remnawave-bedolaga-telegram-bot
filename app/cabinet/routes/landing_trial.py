@@ -172,15 +172,15 @@ async def _cache_attribution(purchase_token: str, body: LandingTrialRequest) -> 
     if body.yandex_cid and settings.YANDEX_OFFLINE_CONV_ENABLED:
         try:
             await cache.set(f'yacid:purchase:{purchase_token}', body.yandex_cid, expire=86400)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     if body.yclid and settings.YANDEX_OFFLINE_CONV_ENABLED:
         try:
             await cache.set(f'yclid:purchase:{purchase_token}', body.yclid, expire=86400)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     if body.subid:
         try:
             await cache.set(f'subid:purchase:{purchase_token}', body.subid, expire=86400)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass

@@ -12,7 +12,6 @@ from app.config import settings
 from app.database.crud.server_squad import get_all_server_squads
 from app.database.crud.user import get_user_by_id
 from app.database.models import Subscription, SubscriptionStatus, User
-from app.services import traffic_limit_squad_service
 from app.external.remnawave_api import (
     RemnaWaveAPI,
     RemnaWaveAPIError,
@@ -21,6 +20,7 @@ from app.external.remnawave_api import (
     UserStatus,
     is_user_not_found_error,
 )
+from app.services import traffic_limit_squad_service
 from app.utils.subscription_utils import (
     resolve_hwid_device_limit_for_payload,
 )
