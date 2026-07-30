@@ -213,6 +213,8 @@ class LandingCreateRequest(BaseModel):
     analytics_view_goal: str | None = Field(default=None, max_length=64)
     analytics_click_enabled: bool = False
     analytics_click_goal: str | None = Field(default=None, max_length=64)
+    # Изолированная фича форка: разрешить выдачу триала через эту воронку.
+    trial_enabled: bool = False
 
     @model_validator(mode='after')
     def validate_analytics_goals(self) -> 'LandingCreateRequest':
@@ -335,6 +337,7 @@ class LandingUpdateRequest(BaseModel):
     analytics_view_goal: str | None = Field(default=None, max_length=64)
     analytics_click_enabled: bool | None = None
     analytics_click_goal: str | None = Field(default=None, max_length=64)
+    trial_enabled: bool | None = None
 
     @field_validator('background_config')
     @classmethod
@@ -487,6 +490,7 @@ class LandingDetailResponse(BaseModel):
     analytics_view_goal: str | None = None
     analytics_click_enabled: bool = False
     analytics_click_goal: str | None = None
+    trial_enabled: bool = False
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -684,6 +688,7 @@ async def create_landing_page(
         analytics_view_goal=request.analytics_view_goal,
         analytics_click_enabled=request.analytics_click_enabled,
         analytics_click_goal=request.analytics_click_goal,
+        trial_enabled=request.trial_enabled,
     )
 
     logger.info('Admin created landing page', admin_id=admin.id, slug=landing.slug, landing_id=landing.id)
@@ -1174,6 +1179,7 @@ def _landing_to_detail(landing: LandingPage) -> LandingDetailResponse:
         analytics_view_goal=landing.analytics_view_goal,
         analytics_click_enabled=landing.analytics_click_enabled,
         analytics_click_goal=landing.analytics_click_goal,
+        trial_enabled=getattr(landing, 'trial_enabled', False),
         created_at=landing.created_at,
         updated_at=landing.updated_at,
     )

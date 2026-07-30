@@ -24,6 +24,7 @@ from app.services.guest_purchase_service import (
     create_purchase,
     validate_and_calculate,
 )
+from app.services.landing_trial_service import get_landing_trial_info
 from app.services.payment_method_config_service import _get_method_defaults
 from app.services.payment_service import PaymentService
 from app.utils.cache import RateLimitCache, cache
@@ -109,6 +110,9 @@ class LandingConfigResponse(BaseModel):
     analytics_view_goal: str | None = None
     analytics_click_enabled: bool = False
     analytics_click_goal: str | None = None
+    # Изолированная фича форка: блок триала лендинг-воронки (null если недоступен).
+    # {enabled, duration_days, traffic_limit_gb, device_limit, requires_payment, price_kopeks, price_rubles}
+    trial: dict | None = None
 
 
 _EMAIL_RE = re.compile(r'^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$')
@@ -708,6 +712,7 @@ async def get_landing_config(
         analytics_view_goal=landing.analytics_view_goal,
         analytics_click_enabled=landing.analytics_click_enabled,
         analytics_click_goal=landing.analytics_click_goal,
+        trial=await get_landing_trial_info(db, landing),
     )
 
 

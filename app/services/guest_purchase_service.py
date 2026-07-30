@@ -359,6 +359,25 @@ async def fulfill_purchase(
             tariff_id=purchase.tariff_id,
         )
 
+        # Изолированная фича форка: платный триал через лендинг-воронку.
+        # Вся логика выдачи trial-подписки — в landing_trial_service (низкий риск мержа).
+        if getattr(purchase, 'is_trial', False):
+            from app.services.landing_trial_service import provision_trial_for_purchase
+
+            await provision_trial_for_purchase(db, purchase, user)
+            await db.commit()
+            await db.refresh(purchase, attribute_names=['landing', 'user', 'buyer'])
+            if purchase.cabinet_password and recipient_type == 'email' and is_new_account:
+                purchase.auto_login_token = create_auto_login_token(user.id)
+                await db.commit()
+            logger.info(
+                'Guest paid trial fulfilled',
+                purchase_id=purchase.id,
+                token_prefix=purchase_token[:5],
+                user_id=user.id,
+            )
+            return purchase
+
         # Load tariff early — needed for both PENDING_ACTIVATION and DELIVERED paths
         tariff = await get_tariff_by_id(db, purchase.tariff_id)
         if tariff is None:

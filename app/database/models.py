@@ -4333,6 +4333,9 @@ class LandingPage(Base):
     analytics_view_goal = Column(String(64), nullable=True)
     analytics_click_enabled = Column(Boolean, nullable=False, default=False, server_default=text('false'))
     analytics_click_goal = Column(String(64), nullable=True)
+    # Разрешить выдачу триала через эту лендинг-воронку (изолированная фича форка).
+    # Параметры триала берутся из TRIAL_*/триал-тарифа; здесь только вкл/выкл на лендинг.
+    trial_enabled = Column(Boolean, nullable=False, default=False, server_default=text('false'))
     created_at = Column(AwareDateTime(), server_default=func.now())
     updated_at = Column(AwareDateTime(), server_default=func.now(), onupdate=func.now())
 
@@ -4371,6 +4374,9 @@ class GuestPurchase(Base):
     contact_type = Column(String(20), nullable=False)  # 'email' or 'telegram'
     contact_value = Column(String(255), nullable=False)
     is_gift = Column(Boolean, nullable=False, default=False)
+    # Покупка является активацией триала через лендинг-воронку (изолированная фича форка).
+    # При True в fulfill_purchase выдаётся trial-подписка вместо платной.
+    is_trial = Column(Boolean, nullable=False, default=False, server_default=text('false'))
     source = Column(String(20), nullable=False, default='landing', server_default='landing')  # 'landing' or 'cabinet'
     buyer_user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     gift_recipient_type = Column(String(20), nullable=True)

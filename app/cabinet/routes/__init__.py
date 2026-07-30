@@ -54,6 +54,7 @@ from .gift import router as gift_router
 from .info import router as info_router
 from .info_pages import router as info_pages_router
 from .landing import router as landing_router
+from .landing_trial import router as landing_trial_router
 from .media import router as media_router
 from .news import router as news_router
 from .notifications import router as notifications_router
@@ -111,6 +112,7 @@ router.include_router(promo_router)
 router.include_router(notifications_router)
 router.include_router(info_router)
 router.include_router(branding_router)
+router.include_router(landing_trial_router)
 router.include_router(landing_router)
 router.include_router(media_router)
 router.include_router(news_router)

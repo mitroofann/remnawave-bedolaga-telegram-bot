@@ -362,6 +362,12 @@ class Settings(BaseSettings):
     # Длительность триала всё равно берётся из TRIAL_DURATION_DAYS
     TRIAL_TARIFF_ID: int = 0
 
+    # Kill-switch фичи «выдача триала через публичную лендинг-воронку» (изолированная
+    # фича форка). False = эндпоинт /cabinet/landing/{slug}/trial отдаёт 403 и блок
+    # trial в конфиге лендинга = null, независимо от landing.trial_enabled. Параметры
+    # самого триала (длительность/лимиты/цена/платный) берутся из TRIAL_* и триал-тарифа.
+    LANDING_TRIAL_ENABLED: bool = False
+
     # Настройки докупки трафика
     TRAFFIC_TOPUP_ENABLED: bool = True  # Включить/выключить функцию докупки трафика
     # Пакеты для докупки трафика (формат: "гб:цена:enabled", пустая строка = использовать TRAFFIC_PACKAGES_CONFIG)

@@ -81,6 +81,7 @@ _LANDING_UPDATABLE_FIELDS = frozenset(
         'analytics_view_goal',
         'analytics_click_enabled',
         'analytics_click_goal',
+        'trial_enabled',
     }
 )
 
