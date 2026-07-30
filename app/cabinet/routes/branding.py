@@ -82,6 +82,22 @@ class BrandingNameUpdate(BaseModel):
     name: str
 
 
+class FontScales(BaseModel):
+    """Глобальные множители размера шрифта (кламп 0.75–1.5 на фронте — тут храним как есть)."""
+
+    small: float = 1.0
+    body: float = 1.0
+    heading: float = 1.0
+
+
+class FontScalesUpdate(BaseModel):
+    """Частичное обновление множителей шрифта."""
+
+    small: float | None = None
+    body: float | None = None
+    heading: float | None = None
+
+
 class ThemeColorsResponse(BaseModel):
     """Theme colors settings."""
 
@@ -97,6 +113,9 @@ class ThemeColorsResponse(BaseModel):
     success: str = '#22c55e'
     warning: str = '#f59e0b'
     error: str = '#ef4444'
+    # Глобальные множители размера шрифта. Вложенная модель со своими дефолтами,
+    # поэтому частично сохранённый объект автоматически дополняется единицами.
+    font_scales: FontScales = Field(default_factory=FontScales)
 
 
 class ThemeColorsUpdate(BaseModel):
@@ -114,6 +133,7 @@ class ThemeColorsUpdate(BaseModel):
     success: str | None = None
     warning: str | None = None
     error: str | None = None
+    font_scales: FontScalesUpdate | None = None
 
 
 class EnabledThemesResponse(BaseModel):
@@ -347,6 +367,7 @@ DEFAULT_THEME_COLORS = {
     'success': '#22c55e',
     'warning': '#f59e0b',
     'error': '#ef4444',
+    'font_scales': {'small': 1.0, 'body': 1.0, 'heading': 1.0},
 }
 
 
@@ -677,12 +698,21 @@ async def update_theme_colors(
     # Update with new values (only non-None fields)
     update_data = payload.model_dump(exclude_none=True)
 
+    # font_scales — не цвет: отделяем до hex-валидации и мёржим частично,
+    # чтобы обновление одного множителя не затирало остальные.
+    font_scales_update = update_data.pop('font_scales', None)
+
     # Validate hex colors
     for key, value in update_data.items():
         if not validate_hex_color(value):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f'Invalid hex color for {key}: {value}')
 
     current_colors.update(update_data)
+
+    if font_scales_update:
+        current_scales = dict(current_colors.get('font_scales') or {})
+        current_scales.update(font_scales_update)
+        current_colors['font_scales'] = current_scales
 
     # Save to database
     await set_setting_value(db, THEME_COLORS_KEY, json.dumps(current_colors))
