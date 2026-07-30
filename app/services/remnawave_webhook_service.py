@@ -1189,39 +1189,30 @@ class RemnaWaveWebhookService:
         """[Форк] Погасить лимит-сквады вместо LIMITED. True = обработано (не переводить в LIMITED)."""
         if not traffic_limit_squad_service.is_enabled():
             return False
-        if not traffic_limit_squad_service.squads_to_disable(subscription):
+
+        # Панель шлёт user.limited ПОВТОРНО (~каждые 15с), пока считает юзера LIMITED.
+        # Первый вебхук: сквады ещё подключены (target непуст) — гасим и шлём уведомление.
+        # Повторные: сквады уже погашены (already_disabled) — молча перепушиваем безлимит
+        # (снять LIMITED на панели) и возвращаем True, БЕЗ второго уведомления и без LIMITED.
+        already_disabled = traffic_limit_squad_service.has_disabled_squads(subscription)
+        target_squads = traffic_limit_squad_service.squads_to_disable(subscription)
+        if not already_disabled and not target_squads:
             return False
 
-        # used-трафик из вебхука (nested userTraffic.usedTrafficBytes, fallback плоский ключ);
-        # если нет — сервис сам дочитает с панели.
-        user_traffic = data.get('userTraffic')
-        used_bytes = (
-            user_traffic.get('usedTrafficBytes')
-            if isinstance(user_traffic, dict) and user_traffic.get('usedTrafficBytes') is not None
-            else data.get('usedTrafficBytes')
-        )
-        try:
-            used_bytes = int(used_bytes) if used_bytes is not None else None
-        except (ValueError, TypeError):
-            used_bytes = None
-
-        # Снимок погашенных сквадов ДО применения (для имён в уведомлении).
-        target_squads = traffic_limit_squad_service.squads_to_disable(subscription)
-
-        handled = await traffic_limit_squad_service.disable_squads_on_limit(
-            db, user, subscription, used_bytes=used_bytes
-        )
+        handled = await traffic_limit_squad_service.disable_squads_on_limit(db, user, subscription)
         if not handled:
             return False
 
         self._stamp_webhook_update(subscription)
-        await self._notify_user(
-            user,
-            'WEBHOOK_SUB_SQUAD_LIMITED',
-            reply_markup=self._get_traffic_keyboard(user),
-            format_kwargs=await self._traffic_limit_squad_format_kwargs(subscription, target_squads),
-            subscription=subscription,
-        )
+        # Уведомление — только при ПЕРВОМ гашении (не на повторных вебхуках).
+        if not already_disabled:
+            await self._notify_user(
+                user,
+                'WEBHOOK_SUB_SQUAD_LIMITED',
+                reply_markup=self._get_traffic_keyboard(user),
+                format_kwargs=await self._traffic_limit_squad_format_kwargs(subscription, target_squads),
+                subscription=subscription,
+            )
         return True
 
     @staticmethod
