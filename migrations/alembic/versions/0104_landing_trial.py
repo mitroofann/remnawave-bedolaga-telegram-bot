@@ -1,8 +1,11 @@
 """add landing_pages.trial_enabled + guest_purchases.is_trial (landing trial feature)
 
-Revision ID: 0101
-Revises: 0100
+Revision ID: 0104
+Revises: 0103
 Create Date: 2026-07-30
+
+NB: перепривязано с 0100 на 0103 при мерже upstream/main — апстрим занял 0101
+(lava subscriptions), 0102, 0103, поэтому landing-trial уходит в хвост цепочки.
 """
 
 from typing import Sequence, Union
@@ -10,8 +13,8 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = '0101'
-down_revision: Union[str, None] = '0100'
+revision: str = '0104'
+down_revision: Union[str, None] = '0103'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
