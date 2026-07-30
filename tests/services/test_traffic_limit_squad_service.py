@@ -64,13 +64,15 @@ def test_panel_limit_uses_tariff_when_no_disabled_squads():
     assert svc.panel_traffic_limit_bytes(sub) == 50 * _BYTES_PER_GB
 
 
-def test_panel_limit_uses_raised_value_while_disabled():
+def test_panel_limit_is_unlimited_while_disabled():
+    # Пока сквад погашен — на панели БЕЗЛИМИТ (0), иначе любой лимит пробивается на
+    # оставшихся серверах и панель зацикливает LIMITED. traffic_limit_panel_bytes при
+    # этом не влияет на результат.
     sub = _make_subscription(
         traffic_limit_disabled_squads=['sq-lte'],
         traffic_limit_panel_bytes=12345,
     )
-    # Пока сквад погашен — пушим сохранённый поднятый лимит, а не тарифный.
-    assert svc.panel_traffic_limit_bytes(sub) == 12345
+    assert svc.panel_traffic_limit_bytes(sub) == 0
 
 
 def test_panel_limit_unlimited_tariff():
@@ -136,7 +138,7 @@ def test_should_disable_false_when_tariff_not_configured(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_disable_squads_moves_squad_and_raises_limit(monkeypatch):
+async def test_disable_squads_moves_squad_and_sets_unlimited(monkeypatch):
     monkeypatch.setattr(svc, 'is_enabled', lambda: True)
     sub = _make_subscription()
     user = SimpleNamespace(remnawave_uuid='sub-uuid')
@@ -146,16 +148,15 @@ async def test_disable_squads_moves_squad_and_raises_limit(monkeypatch):
     monkeypatch.setattr(svc, '_push_to_panel', push)
     monkeypatch.setattr(svc, '_resolve_panel_uuid', lambda sub, user: 'sub-uuid')
 
-    # used = 50 ГБ → панельный лимит = used + 10КБ.
-    used_bytes = 50 * _BYTES_PER_GB
-    handled = await svc.disable_squads_on_limit(db, user, sub, used_bytes=used_bytes)
+    handled = await svc.disable_squads_on_limit(db, user, sub)
 
     assert handled is True
     # Лимит-сквад снят из connected, перенесён в disabled.
     assert sub.connected_squads == ['sq-eu']
     assert sub.traffic_limit_disabled_squads == ['sq-lte']
-    # Панельный лимит = used + буфер, тарифный traffic_limit_gb НЕ тронут.
-    assert sub.traffic_limit_panel_bytes == used_bytes + 10 * 1024
+    # На панели БЕЗЛИМИТ (маркер 0), тарифный traffic_limit_gb НЕ тронут.
+    assert sub.traffic_limit_panel_bytes == 0
+    assert svc.panel_traffic_limit_bytes(sub) == 0
     assert sub.traffic_limit_gb == 50
     push.assert_awaited_once()
 
@@ -178,21 +179,41 @@ async def test_disable_squads_nothing_to_disable(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_disable_squads_idempotent_when_already_disabled(monkeypatch):
+async def test_disable_squads_repushes_unlimited_when_already_disabled(monkeypatch):
     monkeypatch.setattr(svc, 'is_enabled', lambda: True)
     push = AsyncMock(return_value=True)
     monkeypatch.setattr(svc, '_push_to_panel', push)
     monkeypatch.setattr(svc, '_resolve_panel_uuid', lambda sub, user: 'sub-uuid')
+    # Застрявшая подписка: сквады погашены, но на панели ещё старый ненулевой лимит,
+    # панель шлёт LIMITED повторно.
     sub = _make_subscription(
         connected_squads=['sq-eu'],
         traffic_limit_disabled_squads=['sq-lte'],
         traffic_limit_panel_bytes=123,
     )
-    # Повторный вебхук: сквады уже погашены — возвращаем True (не переводить в LIMITED),
-    # но панель повторно не трогаем.
     handled = await svc.disable_squads_on_limit(_fake_db(), SimpleNamespace(), sub)
     assert handled is True
-    push.assert_not_awaited()
+    # Ненулевой лимит обнулён (→ panel_traffic_limit_bytes вернёт безлимит) и перепушен + enable.
+    assert sub.traffic_limit_panel_bytes == 0
+    push.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_disable_squads_repush_when_already_unlimited(monkeypatch):
+    monkeypatch.setattr(svc, 'is_enabled', lambda: True)
+    push = AsyncMock(return_value=True)
+    monkeypatch.setattr(svc, '_push_to_panel', push)
+    monkeypatch.setattr(svc, '_resolve_panel_uuid', lambda sub, user: 'sub-uuid')
+    # Повторный вебхук на уже корректно погашенной подписке (лимит уже 0).
+    sub = _make_subscription(
+        connected_squads=['sq-eu'],
+        traffic_limit_disabled_squads=['sq-lte'],
+        traffic_limit_panel_bytes=0,
+    )
+    handled = await svc.disable_squads_on_limit(_fake_db(), SimpleNamespace(), sub)
+    assert handled is True
+    # Всё равно перепушиваем безлимит + enable, чтобы снять LIMITED на панели.
+    push.assert_awaited_once()
 
 
 @pytest.mark.anyio

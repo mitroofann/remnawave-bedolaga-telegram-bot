@@ -30,11 +30,6 @@ from app.database.models import Subscription
 
 logger = structlog.get_logger(__name__)
 
-# Буфер сверх потраченного трафика при поднятии панельного лимита (байт).
-# Пользователь просил «used + 10КБ»: лимит в боте остаётся тарифным, а на панели держим
-# минимальный запас, чтобы юзер не вылетел в LIMITED сразу после снятия.
-_LIMIT_BUFFER_BYTES = 10 * 1024
-
 _BYTES_PER_GB = 1024 * 1024 * 1024
 
 
@@ -51,13 +46,17 @@ def has_disabled_squads(subscription: Subscription) -> bool:
 def panel_traffic_limit_bytes(subscription: Subscription) -> int:
     """Лимит трафика (байт), который нужно пушить на панель для этой подписки.
 
-    Пока сквады погашены по лимиту — возвращает сохранённый поднятый лимит (used+буфер),
-    иначе тарифный лимит из `subscription.traffic_limit_gb` (0 = безлимит). Используется
-    во всех местах, которые отправляют `trafficLimitBytes` на панель, чтобы не сбросить
-    поднятый лимит и не зациклить LIMITED.
+    Пока сквады погашены по лимиту — возвращает 0 (БЕЗЛИМИТ на панели). Ключевой момент:
+    RemnaWave считает трафик суммарно по юзеру (по всем серверам), не по отдельному скваду.
+    Ограничение обеспечивается именно снятием метрируемого сквада — остальные серверы
+    безлимитны. Любой ненулевой лимит здесь мгновенно пробивается на оставшихся серверах и
+    панель снова ставит LIMITED (режет ВСЕ серверы разом) → юзер застревает.
+
+    Когда сквады не погашены — тарифный лимит из `subscription.traffic_limit_gb`
+    (0 = безлимит). Используется во всех местах, пушащих `trafficLimitBytes` на панель.
     """
-    if has_disabled_squads(subscription) and subscription.traffic_limit_panel_bytes:
-        return int(subscription.traffic_limit_panel_bytes)
+    if has_disabled_squads(subscription):
+        return 0
     gb = subscription.traffic_limit_gb or 0
     return int(gb) * _BYTES_PER_GB
 
@@ -101,10 +100,14 @@ async def disable_squads_on_limit(
     """Погасить лимит-сквады подписки вместо перевода в LIMITED.
 
     Переносит настроенные в тарифе сквады из ``connected_squads`` в
-    ``traffic_limit_disabled_squads``, поднимает панельный лимит до ``used + буфер``
-    (сохраняя его точно в ``traffic_limit_panel_bytes``), пушит на панель урезанный
-    список сквадов + поднятый лимит + статус ACTIVE и снимает LIMITED (``enable``).
-    ``subscription.status`` остаётся ACTIVE, ``traffic_limit_gb`` не меняется.
+    ``traffic_limit_disabled_squads`` и пушит на панель урезанный список сквадов +
+    БЕЗЛИМИТ (trafficLimitBytes=0) + статус ACTIVE, снимая LIMITED (``enable``).
+    Безлимит обязателен: RemnaWave считает трафик суммарно по юзеру, любой ненулевой
+    лимит мгновенно пробивается на оставшихся серверах и панель зацикливает LIMITED
+    (см. panel_traffic_limit_bytes). ``subscription.status`` остаётся ACTIVE,
+    ``traffic_limit_gb`` не меняется (в боте виден тарифный лимит).
+
+    Параметр ``used_bytes`` больше не используется (оставлен для совместимости сигнатуры).
 
     Возвращает True, если сквады были погашены; False — если гасить нечего (тогда
     вызывающий должен обработать лимит штатно, т.е. перевести в LIMITED).
@@ -112,17 +115,27 @@ async def disable_squads_on_limit(
     if not is_enabled():
         return False
 
-    # Идемпотентность: если уже погашены (повторный вебхук) — сквады уже перенесены из
-    # connected в disabled, поэтому squads_to_disable вернёт пусто. Проверяем ПЕРВОЙ и
-    # сообщаем True, чтобы вызывающий не переводил в LIMITED.
+    panel_uuid = _resolve_panel_uuid(subscription, user)
+
+    # Идемпотентность + восстановление: если сквады уже погашены, но панель всё ещё шлёт
+    # LIMITED (повторный вебхук каждые ~15с, либо застрявшая подписка со старым ненулевым
+    # лимитом) — ПЕРЕПУШИВАЕМ безлимит + enable, чтобы снять LIMITED. Возвращаем True,
+    # чтобы вызывающий не переводил в LIMITED.
     if has_disabled_squads(subscription):
+        # Подстраховка: если поднятый лимит на панели был ненулевым (старая версия) —
+        # обнуляем маркер, чтобы panel_traffic_limit_bytes вернул безлимит.
+        if subscription.traffic_limit_panel_bytes:
+            subscription.traffic_limit_panel_bytes = 0
+            await db.commit()
+            await db.refresh(subscription)
+        if panel_uuid:
+            await _push_to_panel(db, subscription, panel_uuid, enable=True)
         return True
 
     target = squads_to_disable(subscription)
     if not target:
         return False
 
-    panel_uuid = _resolve_panel_uuid(subscription, user)
     if not panel_uuid:
         logger.warning(
             'traffic-limit-squad: нет panel uuid, гашение пропущено',
@@ -134,12 +147,10 @@ async def disable_squads_on_limit(
     target_set = set(target)
     remaining = [uuid for uuid in (subscription.connected_squads or []) if uuid not in target_set]
 
-    resolved_used = int(used_bytes) if used_bytes is not None else await _fetch_used_bytes(panel_uuid)
-    panel_limit = max(resolved_used, 0) + _LIMIT_BUFFER_BYTES
-
     subscription.connected_squads = remaining
     subscription.traffic_limit_disabled_squads = target
-    subscription.traffic_limit_panel_bytes = panel_limit
+    # 0 = маркер «на панели безлимит, пока сквады погашены» (см. panel_traffic_limit_bytes).
+    subscription.traffic_limit_panel_bytes = 0
     await db.commit()
     await db.refresh(subscription)
 
@@ -157,7 +168,7 @@ async def disable_squads_on_limit(
             user_id=subscription.user_id,
             disabled_squads=target,
             remaining_squads=remaining,
-            panel_limit_bytes=panel_limit,
+            panel_limit_bytes=0,
         )
     return True
 
@@ -243,8 +254,7 @@ async def disable_for_subscription_id(db: AsyncSession, subscription_id: int) ->
     """Догрузить подписку (+тариф, +юзер) по id и погасить лимит-сквады.
 
     Точка входа для sync-путей: батч собирает id кандидатов в цикле и обрабатывает их
-    ПОСЛЕ финального commit (панельный push нельзя делать в середине батча). used-байты
-    берём из уже синхронизированного ``traffic_used_gb``, чтобы не дёргать панель повторно.
+    ПОСЛЕ финального commit (панельный push нельзя делать в середине батча).
     """
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
@@ -259,23 +269,7 @@ async def disable_for_subscription_id(db: AsyncSession, subscription_id: int) ->
         return False
 
     user = await get_user_by_id(db, subscription.user_id)
-    used_bytes = int((subscription.traffic_used_gb or 0) * _BYTES_PER_GB)
-    return await disable_squads_on_limit(db, user, subscription, used_bytes=used_bytes)
-
-
-async def _fetch_used_bytes(panel_uuid: str) -> int:
-    """Прочитать текущий использованный трафик юзера с панели (fallback, если не в вебхуке)."""
-    try:
-        from app.services.subscription_service import SubscriptionService
-
-        service = SubscriptionService()
-        async with service.get_api_client() as api:
-            panel_user = await api.get_user_by_uuid(panel_uuid)
-        if panel_user:
-            return int(panel_user.used_traffic_bytes or 0)
-    except Exception as error:
-        logger.warning('traffic-limit-squad: не удалось прочитать used_traffic с панели', error=str(error))
-    return 0
+    return await disable_squads_on_limit(db, user, subscription)
 
 
 async def _push_to_panel(db: AsyncSession, subscription: Subscription, panel_uuid: str, *, enable: bool) -> bool:
