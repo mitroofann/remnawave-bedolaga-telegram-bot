@@ -164,6 +164,7 @@ ALLOWED_BG_TYPES = (
     'matrix-rain',
     'liquid-gradient',
     'constellation',
+    'bulka-cookies',
     'none',
 )
 
@@ -223,6 +224,7 @@ class AnimationConfigUpdate(BaseModel):
             'matrix-rain',
             'liquid-gradient',
             'constellation',
+            'bulka-cookies',
             'none',
         ]
         | None
