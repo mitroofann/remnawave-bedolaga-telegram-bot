@@ -45,7 +45,10 @@
 !assets/
 !assets/**
 !locales/
-!locales/**
+# В git только исходный ru.json — остальные локали (en/fa/ua/zh) генерируются
+# рантаймом (app/localization/loader.py) в примонтированную locales/ и трекаться
+# не должны, иначе засоряют git status на боевых серверах.
+!locales/ru.json
 !.github/
 !.github/**
 
