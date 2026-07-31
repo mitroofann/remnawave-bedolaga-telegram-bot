@@ -1101,6 +1101,22 @@ class RemnaWaveWebhookService:
         if not already_handled and not expire_squad_service.should_handle_on_expiry(subscription):
             return False
 
+        # [Форк] Разрыв петли ре-пушей (наблюдалось ~100 user.modified/сек). handle_expiration
+        # ИДЕМПОТЕНТНО перепушивает текущее состояние на КАЖДЫЙ вызов, а каждый наш push в панель
+        # порождает новый user.modified(status=EXPIRED) → бесконечный шторм вебхуков. Если подписка
+        # УЖЕ обработана (expire_disabled_squads заполнены) И мы недавно сами пушили панель
+        # (echo-окно last_webhook_update_at, 60с) — входящий EXPIRED это эхо нашего же push, а не
+        # новое событие. Панель уже в нужном состоянии → ничего не пушим, но возвращаем True, чтобы
+        # штатная EXPIRED-обработка не сработала поверх. Первичная обработка (already_handled=False)
+        # и «панель отстаёт дольше 60с» по-прежнему пушат; непрошедший push добьёт fallback-сканер.
+        if already_handled and is_recently_updated_by_webhook(subscription):
+            logger.debug(
+                'Webhook: пропуск ре-пуша expire-squad (echo нашего push, панель уже согласована)',
+                subscription_id=subscription.id,
+                user_id=user.id,
+            )
+            return True
+
         # Ветка B применима, если тариф задаёт free-сквады + дни (до обработки — по тарифу).
         free_branch = bool(expire_squad_service.resolve_free_squads(subscription))
 

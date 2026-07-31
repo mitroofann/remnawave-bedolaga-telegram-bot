@@ -221,3 +221,58 @@ async def test_user_modified_active_future_does_not_trigger_expire_squads():
         await svc._handle_user_modified(AsyncMock(), _user(), sub, {'status': 'ACTIVE'})
 
     svc._handle_expire_squads.assert_not_awaited()
+
+
+# ---------- [Форк] разрыв петли ре-пушей expire-squad ----------
+
+
+async def test_handle_expire_squads_skips_repush_on_webhook_echo():
+    """Регрессия (шторм ~100 user.modified/сек): подписка уже обработана (expire_disabled_squads
+    заполнены) и мы недавно сами пушили панель (echo-окно) → входящий EXPIRED это эхо нашего же
+    push. Не перепушиваем (иначе петля), но возвращаем True, чтобы штатный EXPIRED не сработал."""
+    from datetime import UTC, datetime
+
+    svc = _service()
+    sub = MagicMock()
+    sub.id = 42
+    sub.last_webhook_update_at = datetime.now(UTC)  # только что пушили → echo-окно открыто
+
+    with (
+        patch('app.services.remnawave_webhook_service.expire_squad_service') as ess,
+        patch(
+            'app.services.remnawave_webhook_service.is_recently_updated_by_webhook',
+            return_value=True,
+        ),
+    ):
+        ess.is_enabled.return_value = True
+        ess.has_expire_disabled_squads.return_value = True  # already_handled
+        ess.handle_expiration = AsyncMock(return_value=True)
+
+        handled = await svc._handle_expire_squads(AsyncMock(), _user(), sub, {'status': 'EXPIRED'})
+
+    assert handled is True
+    ess.handle_expiration.assert_not_awaited()  # ре-пуш НЕ выполнен — петля разорвана
+
+
+async def test_handle_expire_squads_still_repushes_after_echo_window():
+    """Вне echo-окна (панель отстаёт дольше 60с) ре-пуш ВЫПОЛНЯЕТСЯ — фича самолечится."""
+    svc = _service()
+    sub = MagicMock()
+    sub.id = 42
+
+    with (
+        patch('app.services.remnawave_webhook_service.expire_squad_service') as ess,
+        patch(
+            'app.services.remnawave_webhook_service.is_recently_updated_by_webhook',
+            return_value=False,
+        ),
+    ):
+        ess.is_enabled.return_value = True
+        ess.has_expire_disabled_squads.return_value = True
+        ess.resolve_free_squads.return_value = []  # ветка A → без уведомления
+        ess.handle_expiration = AsyncMock(return_value=True)
+
+        handled = await svc._handle_expire_squads(AsyncMock(), _user(), sub, {'status': 'EXPIRED'})
+
+    assert handled is True
+    ess.handle_expiration.assert_awaited_once()
