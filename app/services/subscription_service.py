@@ -586,17 +586,31 @@ class SubscriptionService:
                     reason=reset_reason,
                 )
 
-            # [Форк] Аналогично: продление/смена тарифа (reset_traffic+sync_squads) = момент
-            # вернуть сквады, отложенные при истечении (expire_squad_service, A/B). Возвращаем
-            # реальные сквады в connected_squads и очищаем маркеры free-окна ДО формирования
-            # payload — ниже он уйдёт с полным списком сквадов и корректным статусом/expire.
-            if reset_traffic and sync_squads and expire_squad_service.has_expire_disabled_squads(subscription):
-                expire_squad_service.apply_restore_fields(subscription)
-                logger.info(
-                    'expire-squad: сквады восстановлены при reset_traffic',
-                    subscription_id=subscription.id,
-                    reason=reset_reason,
+            # [Форк] Вернуть сквады, отложенные при истечении (expire_squad_service, A/B), в двух
+            # случаях: (1) reset-флоу продления/смены тарифа (reset_traffic+sync_squads); (2) ЛЮБАЯ
+            # активация подписки БЕЗ reset — админ «Активировать», реактивация, простое включение,
+            # автопродление, — когда подписка снова активна по времени (status ACTIVE/TRIAL и
+            # end_date в будущем). Без этого connected_squads остался бы пустым (снят при истечении),
+            # и push ниже (`if sync_squads and connected_squads`) НЕ отправил бы сквады — панель
+            # осталась бы без хостов. Возвращаем реальные сквады и чистим маркеры free-окна ДО
+            # формирования payload — ниже он уйдёт с полным списком сквадов и корректным статусом.
+            # Free-окно (ветка B) НЕ заденет: там end_date в ПРОШЛОМ → «активна по времени» ложно,
+            # free-сквад не затрётся; его снимет только finalize_expired по истечении free-дней.
+            if sync_squads and expire_squad_service.has_expire_disabled_squads(subscription):
+                _now = datetime.now(UTC)
+                _reviving = (
+                    subscription.status in (SubscriptionStatus.ACTIVE.value, SubscriptionStatus.TRIAL.value)
+                    and subscription.end_date is not None
+                    and subscription.end_date > _now
                 )
+                if reset_traffic or _reviving:
+                    expire_squad_service.apply_restore_fields(subscription)
+                    logger.info(
+                        'expire-squad: сквады восстановлены при активации/reset',
+                        subscription_id=subscription.id,
+                        reason=reset_reason or 'reactivate',
+                        reset_traffic=reset_traffic,
+                    )
 
             current_time = datetime.now(UTC)
             # Определяем актуальный статус для отправки в RemnaWave

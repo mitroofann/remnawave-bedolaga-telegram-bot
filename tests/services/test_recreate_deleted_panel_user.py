@@ -63,6 +63,12 @@ def _make_subscription(*, status=SubscriptionStatus.ACTIVE.value, days_left=10):
         remnawave_uuid=None,
         is_trial=False,
         last_webhook_update_at=None,
+        # Поля форка (traffic-limit + expire-squad) — иначе has_disabled_squads/
+        # has_expire_disabled_squads спотыкаются об отсутствующий атрибут в update_remnawave_user.
+        traffic_limit_disabled_squads=[],
+        traffic_limit_panel_bytes=None,
+        expire_disabled_squads=[],
+        expire_free_until=None,
     )
 
 
@@ -179,6 +185,58 @@ async def test_update_does_not_recreate_for_expired_subscription(monkeypatch):
 
     assert result is None
     service.create_remnawave_user.assert_not_awaited()
+
+
+# ---- [Форк] expire-squad: восстановление сквадов при активации без reset_traffic ----
+
+
+async def test_update_restores_expire_disabled_squads_on_revive(monkeypatch):
+    """Регрессия: после истечения (ветка A) connected_squads пуст, реальные лежат в
+    expire_disabled_squads. Любая активация (админ «Активировать», реактивация, простое
+    включение) зовёт update_remnawave_user БЕЗ reset_traffic. Сквады обязаны вернуться в
+    payload, иначе панель останется без хостов (`if sync_squads and connected_squads` пропустит)."""
+    import app.services.expire_squad_service as ess
+
+    monkeypatch.setattr(ess, 'is_enabled', lambda: True)
+    api = AsyncMock()
+    api.update_user.return_value = SimpleNamespace(subscription_url='https://s/u', happ_crypto_link=None)
+    service = _setup_subscription_service(monkeypatch, api)
+
+    sub = _make_subscription(days_left=10)  # ACTIVE, срок в будущем → «оживает»
+    sub.connected_squads = []
+    sub.expire_disabled_squads = ['sq-eu', 'sq-lte']
+    sub.expire_free_until = None
+
+    await service.update_remnawave_user(AsyncMock(), sub, sync_squads=True)
+
+    api.update_user.assert_awaited_once()
+    assert api.update_user.await_args.kwargs['active_internal_squads'] == ['sq-eu', 'sq-lte']
+    # Маркеры очищены — фича больше не активна для подписки.
+    assert sub.connected_squads == ['sq-eu', 'sq-lte']
+    assert sub.expire_disabled_squads == []
+
+
+async def test_update_keeps_free_window_squads_intact(monkeypatch):
+    """Ветка B (free-окно): end_date в ПРОШЛОМ, доступ через free-сквад ещё активен панельно.
+    Рутинный push НЕ должен восстанавливать реальные сквады (это оборвало бы free-окно) —
+    revive-гард требует end_date в будущем."""
+    import app.services.expire_squad_service as ess
+
+    monkeypatch.setattr(ess, 'is_enabled', lambda: True)
+    api = AsyncMock()
+    api.update_user.return_value = SimpleNamespace(subscription_url='https://s/u', happ_crypto_link=None)
+    service = _setup_subscription_service(monkeypatch, api)
+
+    sub = _make_subscription(status=SubscriptionStatus.ACTIVE.value, days_left=-2)  # срок прошёл
+    sub.connected_squads = ['sq-free']
+    sub.expire_disabled_squads = ['sq-eu', 'sq-lte']
+    sub.expire_free_until = datetime.now(UTC) + timedelta(days=3)
+
+    await service.update_remnawave_user(AsyncMock(), sub, sync_squads=True)
+
+    # Free-сквад НЕ затёрт, реальные остались отложенными.
+    assert sub.connected_squads == ['sq-free']
+    assert sub.expire_disabled_squads == ['sq-eu', 'sq-lte']
 
 
 # ---- MonitoringService.update_remnawave_user: тот же рекавери в рутинном синке ----
