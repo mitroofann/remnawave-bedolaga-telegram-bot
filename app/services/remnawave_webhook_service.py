@@ -158,6 +158,14 @@ class RemnaWaveWebhookService:
     # For multi-worker setups, move to Redis or another shared store.
     _recent_recreations: dict[int, datetime] = {}
     _RECREATION_GUARD_SECONDS: int = 120  # 2-minute cooldown
+    # [Форк] Маркер НАШЕГО собственного expire-push (снятие/выдача сквадов при истечении).
+    # Штампуется ТОЛЬКО когда мы реально пушим expire-состояние на панель, чтобы разорвать
+    # петлю ре-пушей (наш push → user.modified(EXPIRED) → ре-пуш). НЕ путать с generic
+    # last_webhook_update_at, который штампуется на ЛЮБОЙ входящий webhook (в т.ч. рутинный
+    # синк) — читать его в echo-guard'е нельзя, иначе рутинный user.modified за <60с до
+    # подлинного истечения ложно глушит ветку A/B.
+    _recent_expire_pushes: dict[int, datetime] = {}
+    _EXPIRE_PUSH_GUARD_SECONDS: int = 60
     _intentional_panel_deletions_by_uuid: dict[str, datetime] = {}
     _intentional_panel_deletions_by_telegram_id: dict[int, datetime] = {}
     _INTENTIONAL_PANEL_DELETION_GUARD_SECONDS: int = 300
@@ -1026,6 +1034,31 @@ class RemnaWaveWebhookService:
         """Mark subscription as recently updated by webhook to prevent sync overwrite."""
         subscription.last_webhook_update_at = datetime.now(UTC)
 
+    def _stamp_expire_push(self, subscription_id: int) -> None:
+        """[Форк] Отметить, что МЫ сами только что запушили expire-состояние на панель.
+
+        In-memory маркер (по образцу _recent_recreations) — взводит echo-окно ТОЛЬКО на наш
+        собственный push, в отличие от generic last_webhook_update_at (тот штампуется на любой
+        входящий webhook). Попутно чистим протухшие записи, чтобы dict не рос без границ.
+        """
+        now = datetime.now(UTC)
+        if self._recent_expire_pushes:
+            stale = [
+                sid
+                for sid, ts in self._recent_expire_pushes.items()
+                if (now - ts).total_seconds() >= self._EXPIRE_PUSH_GUARD_SECONDS
+            ]
+            for sid in stale:
+                del self._recent_expire_pushes[sid]
+        self._recent_expire_pushes[subscription_id] = now
+
+    def _is_recent_expire_push(self, subscription_id: int) -> bool:
+        """[Форк] True, если МЫ сами пушили expire-состояние этой подписки внутри guard-окна."""
+        ts = self._recent_expire_pushes.get(subscription_id)
+        if ts is None:
+            return False
+        return (datetime.now(UTC) - ts).total_seconds() < self._EXPIRE_PUSH_GUARD_SECONDS
+
     # ------------------------------------------------------------------
     # User event handlers
     # ------------------------------------------------------------------
@@ -1104,12 +1137,15 @@ class RemnaWaveWebhookService:
         # [Форк] Разрыв петли ре-пушей (наблюдалось ~100 user.modified/сек). handle_expiration
         # ИДЕМПОТЕНТНО перепушивает текущее состояние на КАЖДЫЙ вызов, а каждый наш push в панель
         # порождает новый user.modified(status=EXPIRED) → бесконечный шторм вебхуков. Если подписка
-        # УЖЕ обработана (expire_disabled_squads заполнены) И мы недавно сами пушили панель
-        # (echo-окно last_webhook_update_at, 60с) — входящий EXPIRED это эхо нашего же push, а не
-        # новое событие. Панель уже в нужном состоянии → ничего не пушим, но возвращаем True, чтобы
-        # штатная EXPIRED-обработка не сработала поверх. Первичная обработка (already_handled=False)
-        # и «панель отстаёт дольше 60с» по-прежнему пушат; непрошедший push добьёт fallback-сканер.
-        if already_handled and is_recently_updated_by_webhook(subscription):
+        # УЖЕ обработана (expire_disabled_squads заполнены) И МЫ САМИ недавно пушили expire-состояние
+        # (маркер _recent_expire_pushes, 60с) — входящий EXPIRED это эхо нашего же push, а не новое
+        # событие. Панель уже в нужном состоянии → ничего не пушим, но возвращаем True, чтобы штатная
+        # EXPIRED-обработка не сработала поверх. Первичная обработка (already_handled=False) и «мы
+        # давно не пушили» по-прежнему пушат; непрошедший push добьёт fallback-сканер.
+        # ВАЖНО: маркер именно НАШЕГО push, НЕ generic last_webhook_update_at (тот штампуется на
+        # ЛЮБОЙ входящий webhook, включая рутинный синк — рутинный user.modified за <60с до подлинного
+        # истечения ложно принимался за эхо и молча глушил ветку A/B).
+        if already_handled and self._is_recent_expire_push(subscription.id):
             logger.debug(
                 'Webhook: пропуск ре-пуша expire-squad (echo нашего push, панель уже согласована)',
                 subscription_id=subscription.id,
@@ -1124,6 +1160,9 @@ class RemnaWaveWebhookService:
         if not handled:
             return False
 
+        # Наш push прошёл → взводим echo-окно (именно наш push, а не любой webhook). Следующий
+        # эхо-EXPIRED в течение guard-окна попадёт под пропуск выше и петля разорвётся.
+        self._stamp_expire_push(subscription.id)
         self._stamp_webhook_update(subscription)
 
         # Уведомление — только при ПЕРВОЙ активации ветки B (не на повторных вебхуках, не для A).

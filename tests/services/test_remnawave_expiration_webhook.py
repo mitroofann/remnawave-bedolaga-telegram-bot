@@ -226,24 +226,20 @@ async def test_user_modified_active_future_does_not_trigger_expire_squads():
 # ---------- [Форк] разрыв петли ре-пушей expire-squad ----------
 
 
-async def test_handle_expire_squads_skips_repush_on_webhook_echo():
+async def test_handle_expire_squads_skips_repush_on_own_push_echo():
     """Регрессия (шторм ~100 user.modified/сек): подписка уже обработана (expire_disabled_squads
-    заполнены) и мы недавно сами пушили панель (echo-окно) → входящий EXPIRED это эхо нашего же
-    push. Не перепушиваем (иначе петля), но возвращаем True, чтобы штатный EXPIRED не сработал."""
+    заполнены) и МЫ САМИ недавно пушили expire-состояние (маркер _recent_expire_pushes) → входящий
+    EXPIRED это эхо нашего же push. Не перепушиваем (иначе петля), но возвращаем True, чтобы штатный
+    EXPIRED не сработал."""
     from datetime import UTC, datetime
 
     svc = _service()
     sub = MagicMock()
     sub.id = 42
-    sub.last_webhook_update_at = datetime.now(UTC)  # только что пушили → echo-окно открыто
+    # МЫ сами только что пушили expire-состояние → echo-окно открыто.
+    svc._recent_expire_pushes = {42: datetime.now(UTC)}
 
-    with (
-        patch('app.services.remnawave_webhook_service.expire_squad_service') as ess,
-        patch(
-            'app.services.remnawave_webhook_service.is_recently_updated_by_webhook',
-            return_value=True,
-        ),
-    ):
+    with patch('app.services.remnawave_webhook_service.expire_squad_service') as ess:
         ess.is_enabled.return_value = True
         ess.has_expire_disabled_squads.return_value = True  # already_handled
         ess.handle_expiration = AsyncMock(return_value=True)
@@ -254,19 +250,41 @@ async def test_handle_expire_squads_skips_repush_on_webhook_echo():
     ess.handle_expiration.assert_not_awaited()  # ре-пуш НЕ выполнен — петля разорвана
 
 
-async def test_handle_expire_squads_still_repushes_after_echo_window():
-    """Вне echo-окна (панель отстаёт дольше 60с) ре-пуш ВЫПОЛНЯЕТСЯ — фича самолечится."""
+async def test_handle_expire_squads_not_muted_by_routine_sync():
+    """КЛЮЧЕВАЯ регрессия ветки B: рутинный user.modified (панельный синк) за <60с до подлинного
+    истечения штампует generic last_webhook_update_at, но НЕ наш _recent_expire_pushes. Раньше
+    echo-guard читал generic-штамп и молча глушил ветку A/B. Теперь — НЕ глушит: подлинное
+    истечение обрабатывается (handle_expiration вызывается)."""
+    from datetime import UTC, datetime
+
     svc = _service()
     sub = MagicMock()
     sub.id = 42
+    # Рутинный синк недавно трогал подписку (generic-штамп взведён)...
+    sub.last_webhook_update_at = datetime.now(UTC)
+    # ...но МЫ сами expire ещё не пушили — маркер пуст.
+    svc._recent_expire_pushes = {}
 
-    with (
-        patch('app.services.remnawave_webhook_service.expire_squad_service') as ess,
-        patch(
-            'app.services.remnawave_webhook_service.is_recently_updated_by_webhook',
-            return_value=False,
-        ),
-    ):
+    with patch('app.services.remnawave_webhook_service.expire_squad_service') as ess:
+        ess.is_enabled.return_value = True
+        ess.has_expire_disabled_squads.return_value = True  # already_handled (сквады отложены)
+        ess.resolve_free_squads.return_value = []
+        ess.handle_expiration = AsyncMock(return_value=True)
+
+        handled = await svc._handle_expire_squads(AsyncMock(), _user(), sub, {'status': 'EXPIRED'})
+
+    assert handled is True
+    ess.handle_expiration.assert_awaited_once()  # НЕ заглушено рутинным синком
+
+
+async def test_handle_expire_squads_still_repushes_after_echo_window():
+    """Вне echo-окна (мы давно не пушили) ре-пуш ВЫПОЛНЯЕТСЯ — фича самолечится."""
+    svc = _service()
+    sub = MagicMock()
+    sub.id = 42
+    svc._recent_expire_pushes = {}  # мы не пушили → echo-окно закрыто
+
+    with patch('app.services.remnawave_webhook_service.expire_squad_service') as ess:
         ess.is_enabled.return_value = True
         ess.has_expire_disabled_squads.return_value = True
         ess.resolve_free_squads.return_value = []  # ветка A → без уведомления
@@ -276,3 +294,23 @@ async def test_handle_expire_squads_still_repushes_after_echo_window():
 
     assert handled is True
     ess.handle_expiration.assert_awaited_once()
+
+
+async def test_handle_expire_squads_stamps_own_push_marker():
+    """После успешного нашего push маркер _recent_expire_pushes взводится → следующий эхо-EXPIRED
+    внутри окна будет пропущен (петля разорвана именно нашим push, а не любым webhook)."""
+    svc = _service()
+    sub = MagicMock()
+    sub.id = 42
+    svc._recent_expire_pushes = {}
+
+    with patch('app.services.remnawave_webhook_service.expire_squad_service') as ess:
+        ess.is_enabled.return_value = True
+        ess.has_expire_disabled_squads.return_value = True
+        ess.resolve_free_squads.return_value = []
+        ess.handle_expiration = AsyncMock(return_value=True)
+
+        await svc._handle_expire_squads(AsyncMock(), _user(), sub, {'status': 'EXPIRED'})
+
+    assert 42 in svc._recent_expire_pushes  # наш push отмечен
+    assert svc._is_recent_expire_push(42) is True
