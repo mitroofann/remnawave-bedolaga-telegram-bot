@@ -1325,6 +1325,28 @@ class RemnaWaveWebhookService:
         changed = False
         grace_open = subscription.id in await get_open_grace_subscription_ids(db)
 
+        # [Форк] Stale EXPIRED-ретрай vs локальное продление. Панель ретраит событие истечения
+        # (user.modified, status=EXPIRED) ~19 раз, и каждый ретрай несёт УСТАРЕВШИЙ снимок момента
+        # истечения (expireAt в прошлом, status=EXPIRED). Если бот уже продлил подписку (end_date в
+        # будущем, статус ACTIVE/TRIAL) и запушил панель на будущий expireAt, то текущее состояние
+        # панели — ACTIVE, а прилетевший EXPIRED — запоздалый ретрай старого события. Без гарда он бы
+        # (1) откатил end_date назад в прошлое (блок expireAt ниже, «панель авторитетна») и
+        # (2) повторно снял сквады через _handle_expire_squads — затерев только что восстановленное
+        # продлением. Локальное продление авторитетнее устаревшего ретрая → игнорируем такой EXPIRED.
+        stale_expired_retry = (
+            data.get('status') == 'EXPIRED'
+            and subscription.end_date is not None
+            and subscription.end_date > datetime.now(UTC)
+            and subscription.status in (SubscriptionStatus.ACTIVE.value, SubscriptionStatus.TRIAL.value)
+        )
+        if stale_expired_retry:
+            logger.info(
+                'Webhook: игнорируем устаревший EXPIRED-ретрай (подписка уже продлена в боте)',
+                subscription_id=subscription.id,
+                user_id=user.id,
+                end_date=subscription.end_date,
+            )
+
         # Sync traffic limit
         # [Форк] пока сквады погашены по лимиту трафика, панельный лимит искусственно поднят
         # (used+буфер) — не даём ему перезаписать тарифный traffic_limit_gb, иначе в боте
@@ -1369,7 +1391,12 @@ class RemnaWaveWebhookService:
         # отдельно синхронизируется ниже: при panel ACTIVE + future end_date подписка
         # всё равно может корректно реактивироваться через обычное продление/активацию.
         expire_at = data.get('expireAt')
-        if expire_at and not grace_open and subscription.status != SubscriptionStatus.DISABLED.value:
+        if (
+            expire_at
+            and not grace_open
+            and not stale_expired_retry
+            and subscription.status != SubscriptionStatus.DISABLED.value
+        ):
             try:
                 parsed_dt = datetime.fromisoformat(expire_at.replace('Z', '+00:00'))
                 new_end_date = parsed_dt.astimezone(UTC)
@@ -1398,7 +1425,7 @@ class RemnaWaveWebhookService:
         # делегируем в _handle_expire_squads ДО синка статуса. handle_expiration идемпотентен, а
         # _handle_expire_squads сам гардит is_enabled/should_handle_on_expiry и дедуп уведомлений B,
         # поэтому повторные вебхуки безопасны. Грейс/суточные/free-окно — пропускаем.
-        if not grace_open:
+        if not grace_open and not stale_expired_retry:
             now = datetime.now(UTC)
             end_date = subscription.end_date
             panel_expired = panel_status == 'EXPIRED' or (

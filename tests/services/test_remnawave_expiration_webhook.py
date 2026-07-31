@@ -150,10 +150,14 @@ async def test_user_modified_used_traffic_falls_back_to_flat_key():
 async def test_user_modified_expired_triggers_expire_squads():
     """Панель шлёт истечение как user.modified(status=EXPIRED), НЕ user.expired.
     Хендлер должен делегировать в _handle_expire_squads (ветка A/B) и выйти сразу."""
+    from datetime import UTC, datetime, timedelta
+
     svc = _service()
     svc._handle_expire_squads = AsyncMock(return_value=True)
     sub = MagicMock()
     sub.id = 42
+    sub.status = 'active'
+    sub.end_date = datetime.now(UTC) - timedelta(days=1)  # реально истекла (срок в прошлом)
     sub.is_daily_paused = False
 
     with (
@@ -169,6 +173,34 @@ async def test_user_modified_expired_triggers_expire_squads():
         await svc._handle_user_modified(AsyncMock(), _user(), sub, {'status': 'EXPIRED'})
 
     svc._handle_expire_squads.assert_awaited_once()
+
+
+async def test_user_modified_stale_expired_retry_after_renewal_is_ignored():
+    """Регрессия: панель ретраит EXPIRED-событие ~19 раз со СТАРЫМ снимком (expireAt в прошлом).
+    Если бот уже продлил подписку (end_date в будущем, статус ACTIVE), запоздалый EXPIRED-ретрай
+    НЕ должен ни откатывать end_date назад, ни снова снимать сквады — иначе продление затирается."""
+    from datetime import UTC, datetime, timedelta
+
+    svc = _service()
+    svc._handle_expire_squads = AsyncMock(return_value=True)
+    sub = MagicMock()
+    sub.id = 42
+    sub.status = 'active'
+    future = datetime.now(UTC) + timedelta(days=1)
+    sub.end_date = future
+    sub.is_daily_paused = False
+
+    with patch(
+        'app.services.remnawave_webhook_service.get_open_grace_subscription_ids',
+        AsyncMock(return_value=set()),
+    ):
+        # Ретрай несёт старый expireAt в прошлом + status=EXPIRED.
+        past_iso = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+        await svc._handle_user_modified(AsyncMock(), _user(), sub, {'status': 'EXPIRED', 'expireAt': past_iso})
+
+    # Сквады НЕ снимаются повторно, end_date НЕ откачен назад.
+    svc._handle_expire_squads.assert_not_awaited()
+    assert sub.end_date == future
 
 
 async def test_user_modified_active_future_does_not_trigger_expire_squads():
