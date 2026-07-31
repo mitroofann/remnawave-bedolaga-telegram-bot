@@ -355,17 +355,19 @@ async def _push_to_panel(
     is_actually_active по ``end_date`` (в прошлом при истечении) и отправил бы DISABLED +
     прошлый expire, убив free-окно. Здесь пушим ровно то, что решила фича. Пустой список
     сквадов ``[]`` доходит корректно (гард update_user = ``is not None``).
+
+    ВАЖНО: ``EXPIRED`` — ВЫЧИСЛЯЕМЫЙ панелью статус (по прошедшему expireAt), его НЕЛЬЗЯ
+    задать в PATCH — панель отвечает ``Validation failed`` и откатывает весь запрос (сквады
+    не снимутся). Поэтому для ветки A статус НЕ шлём вовсе: expireAt уже в прошлом, панель
+    сама выставит EXPIRED. Для ветки B шлём ACTIVE явно (там expireAt в будущем).
     """
-    status_map = {
-        SubscriptionStatus.ACTIVE: 'ACTIVE',
-        SubscriptionStatus.EXPIRED: 'EXPIRED',
-    }
     try:
         from app.external.remnawave_api import UserStatus
         from app.services.subscription_service import SubscriptionService
 
+        # ACTIVE шлём явно; EXPIRED — не шлём (панель вычислит из прошлого expireAt).
+        panel_status = UserStatus.ACTIVE if status == SubscriptionStatus.ACTIVE else None
         service = SubscriptionService()
-        panel_status = UserStatus(status_map[status])
         async with service.get_api_client() as api:
             await api.update_user(
                 uuid=panel_uuid,

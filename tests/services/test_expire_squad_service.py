@@ -305,3 +305,50 @@ async def test_restore_squads_noop_when_nothing_disabled():
     sub = _make_subscription()
     restored = await svc.restore_squads(_fake_db(), sub, reason='test')
     assert restored is False
+
+
+# ---------- _push_to_panel: статус EXPIRED вычисляемый, его слать нельзя ----------
+
+
+async def _run_push(status, expire_at):
+    """Вызвать _push_to_panel с замоканным api-клиентом, вернуть kwargs update_user."""
+    api = MagicMock()
+    api.update_user = AsyncMock()
+    client_cm = MagicMock()
+    client_cm.__aenter__ = AsyncMock(return_value=api)
+    client_cm.__aexit__ = AsyncMock(return_value=False)
+    service = MagicMock()
+    service.get_api_client = MagicMock(return_value=client_cm)
+
+    with patch('app.services.subscription_service.SubscriptionService', return_value=service):
+        ok = await svc._push_to_panel(
+            _make_subscription(),
+            'panel-uuid',
+            active_squads=[],
+            expire_at=expire_at,
+            status=status,
+        )
+    return ok, api.update_user.await_args.kwargs
+
+
+@pytest.mark.anyio
+async def test_push_to_panel_expired_omits_status():
+    """EXPIRED панель вычисляет сама по прошедшему expireAt; слать его в PATCH →
+    Validation failed и откат (сквады не снимутся). Поэтому status НЕ отправляем."""
+    from app.database.models import SubscriptionStatus
+
+    ok, kwargs = await _run_push(SubscriptionStatus.EXPIRED, datetime(2026, 7, 1, tzinfo=UTC))
+    assert ok is True
+    assert kwargs['status'] is None
+    assert kwargs['active_internal_squads'] == []
+
+
+@pytest.mark.anyio
+async def test_push_to_panel_active_sends_status():
+    """Ветка B: expireAt в будущем, статус ACTIVE шлём явно."""
+    from app.database.models import SubscriptionStatus
+    from app.external.remnawave_api import UserStatus
+
+    ok, kwargs = await _run_push(SubscriptionStatus.ACTIVE, datetime(2026, 8, 1, tzinfo=UTC))
+    assert ok is True
+    assert kwargs['status'] == UserStatus.ACTIVE
