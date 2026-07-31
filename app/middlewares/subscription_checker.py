@@ -50,12 +50,16 @@ class SubscriptionStatusMiddleware(BaseMiddleware):
                     # [Форк] Пока активно free-окно (сквад выдан при истечении, expire_squad_service
                     # ветка B) — панельный expireAt в будущем, а end_date в прошлом. Не флипаем в
                     # EXPIRED, иначе доступ по free-скваду оборвётся на первом же заходе юзера.
+                    # Ветка A: если применима фича снятия сквадов — тоже не флипаем здесь, иначе
+                    # прямой флип обойдёт handle_expiration и сквады останутся висеть на панели
+                    # (сканер отбракует уже-EXPIRED). Переход отдаём сканеру _check_expire_squads.
                     if (
                         subscription.status == SubscriptionStatus.ACTIVE.value
                         and subscription.end_date
                         and subscription.end_date <= current_time
                         and not is_active_daily
                         and not expire_squad_service.is_free_window_active(subscription, now=current_time)
+                        and not expire_squad_service.should_handle_on_expiry(subscription)
                     ):
                         time_since_expiry = current_time - subscription.end_date
 

@@ -3507,11 +3507,22 @@ class RemnaWaveService:
                             and not getattr(subscription, 'is_daily_paused', False)
                         )
 
+                        # [Форк] Ветка B: во free-окне доступ ещё активен панельно (end_date в
+                        # прошлом, expire_free_until в будущем) — не флипаем. Ветка A: применима
+                        # фича снятия сквадов — тоже не флипаем, иначе прямой флип обойдёт
+                        # handle_expiration и сквады останутся висеть; переход отдаём сканеру.
+                        from app.services import expire_squad_service as _ess_fix
+
+                        _skip_expire = _ess_fix.is_free_window_active(
+                            subscription, now=current_time
+                        ) or _ess_fix.should_handle_on_expiry(subscription)
+
                         if (
                             end_date_utc + expiry_buffer <= current_time
                             and subscription.status == SubscriptionStatus.ACTIVE.value
                             and not is_recently_updated_by_webhook(subscription)
                             and not is_active_daily
+                            and not _skip_expire
                         ):
                             time_since_expiry = current_time - end_date_utc
                             logger.warning(

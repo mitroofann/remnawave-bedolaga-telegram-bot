@@ -2287,10 +2287,17 @@ async def check_and_update_subscription_status(db: AsyncSession, subscription: S
 
     is_free_window = _ess.is_free_window_active(subscription, now=current_time)
 
+    # [Форк] Ветка A: если фича снятия сквадов применима (включена + есть что снимать), НЕ флипаем
+    # статус здесь. Прямой флип в EXPIRED обходит handle_expiration → сквады остаются висеть на
+    # панели, а быстрый сканер (_check_expire_squads) отбраковывает уже-EXPIRED подписку по гарду
+    # статуса. Отдаём переход сканеру, он снимет сквады и выставит EXPIRED сам (≤ интервал сканера).
+    should_defer_to_scanner = _ess.should_handle_on_expiry(subscription)
+
     if (
         subscription.status == SubscriptionStatus.ACTIVE.value
         and subscription.end_date <= current_time
         and not is_free_window
+        and not should_defer_to_scanner
     ):
         # Детальное логирование для отладки проблемы с деактивацией
         time_diff = current_time - subscription.end_date

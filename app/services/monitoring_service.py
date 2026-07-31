@@ -706,12 +706,16 @@ class MonitoringService:
                 # [Форк] Во free-окне (expire_squad_service ветка B) end_date уже в прошлом, но
                 # доступ через free-сквад ещё активен панельно — не флипаем в EXPIRED.
                 is_free_window = _ess.is_free_window_active(subscription, now=current_time)
-                if is_active_daily or is_free_window:
+                # [Форк] Ветка A: применима фича снятия сквадов — не флипаем здесь, иначе прямой
+                # флип обойдёт handle_expiration и сквады останутся висеть. Отдаём переход сканеру.
+                should_defer_to_scanner = _ess.should_handle_on_expiry(subscription)
+                if is_active_daily or is_free_window or should_defer_to_scanner:
                     logger.debug(
-                        'update_remnawave_user: пропуск expire (суточная/free-окно)',
+                        'update_remnawave_user: пропуск expire (суточная/free-окно/ветка A)',
                         subscription_id=subscription.id,
                         is_active_daily=is_active_daily,
                         is_free_window=is_free_window,
+                        should_defer_to_scanner=should_defer_to_scanner,
                     )
                 else:
                     subscription.status = SubscriptionStatus.EXPIRED.value

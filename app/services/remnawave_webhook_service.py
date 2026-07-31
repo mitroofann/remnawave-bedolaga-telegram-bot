@@ -1389,6 +1389,43 @@ class RemnaWaveWebhookService:
 
         # Sync status from panel
         panel_status = data.get('status')
+
+        # [Форк] Панель сообщает об истечении событием user.modified (status=EXPIRED), а НЕ
+        # user.expired. Штатный синк статуса ниже обрабатывает только ACTIVE/DISABLED — EXPIRED
+        # он игнорирует, поэтому фича снятия сквадов (ветка A) / выдачи free-сквада (B) через
+        # вебхук раньше не срабатывала вовсе (её ждал только 60-сек сканер). Подключаем её здесь:
+        # при панельном EXPIRED (или ACTIVE, но end_date уже в прошлом — панель могла не пересчитать)
+        # делегируем в _handle_expire_squads ДО синка статуса. handle_expiration идемпотентен, а
+        # _handle_expire_squads сам гардит is_enabled/should_handle_on_expiry и дедуп уведомлений B,
+        # поэтому повторные вебхуки безопасны. Грейс/суточные/free-окно — пропускаем.
+        if not grace_open:
+            now = datetime.now(UTC)
+            end_date = subscription.end_date
+            panel_expired = panel_status == 'EXPIRED' or (
+                panel_status == 'ACTIVE' and end_date is not None and end_date <= now
+            )
+            # Гарды считаем ТОЛЬКО при панельном истечении — иначе лишняя работа (и обращение
+            # к expire_free_until/tariff) на каждом обычном user.modified.
+            if panel_expired:
+                tariff = sa_inspect(subscription).dict.get('tariff')
+                is_active_daily = (
+                    tariff is not None
+                    and getattr(tariff, 'is_daily', False)
+                    and not getattr(subscription, 'is_daily_paused', False)
+                )
+                is_free_window = expire_squad_service.is_free_window_active(subscription, now=now)
+                if (
+                    not is_active_daily
+                    and not is_free_window
+                    and await self._handle_expire_squads(db, user, subscription, data)
+                ):
+                    logger.info(
+                        'Webhook: expire-squad обработан из user.modified (status=EXPIRED)',
+                        subscription_id=subscription.id,
+                        user_id=user.id,
+                    )
+                    return
+
         if panel_status and not grace_open:
             now = datetime.now(UTC)
             end_date = subscription.end_date

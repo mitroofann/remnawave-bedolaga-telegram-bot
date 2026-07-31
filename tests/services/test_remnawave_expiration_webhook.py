@@ -6,7 +6,7 @@ while still accepting the old events from 2.7.x panels.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.services.remnawave_webhook_service import RemnaWaveWebhookService
 
@@ -142,3 +142,50 @@ async def test_user_modified_used_traffic_falls_back_to_flat_key():
     sub.traffic_used_gb = 0.0
     await svc._handle_user_modified(AsyncMock(), _user(), sub, {'usedTrafficBytes': 2 * 1024**3})
     assert sub.traffic_used_gb == 2.0
+
+
+# ---------- [Форк] expire-squad через user.modified (status=EXPIRED) ----------
+
+
+async def test_user_modified_expired_triggers_expire_squads():
+    """Панель шлёт истечение как user.modified(status=EXPIRED), НЕ user.expired.
+    Хендлер должен делегировать в _handle_expire_squads (ветка A/B) и выйти сразу."""
+    svc = _service()
+    svc._handle_expire_squads = AsyncMock(return_value=True)
+    sub = MagicMock()
+    sub.id = 42
+    sub.is_daily_paused = False
+
+    with (
+        patch(
+            'app.services.remnawave_webhook_service.get_open_grace_subscription_ids',
+            AsyncMock(return_value=set()),
+        ),
+        patch('app.services.remnawave_webhook_service.expire_squad_service') as ess,
+        patch('app.services.remnawave_webhook_service.sa_inspect') as insp,
+    ):
+        insp.return_value.dict.get.return_value = None  # tariff → None (не суточная)
+        ess.is_free_window_active.return_value = False
+        await svc._handle_user_modified(AsyncMock(), _user(), sub, {'status': 'EXPIRED'})
+
+    svc._handle_expire_squads.assert_awaited_once()
+
+
+async def test_user_modified_active_future_does_not_trigger_expire_squads():
+    """Обычный user.modified (ACTIVE, срок в будущем) НЕ должен трогать expire-squad."""
+    from datetime import UTC, datetime, timedelta
+
+    svc = _service()
+    svc._handle_expire_squads = AsyncMock(return_value=True)
+    sub = MagicMock()
+    sub.id = 42
+    sub.status = 'active'
+    sub.end_date = datetime.now(UTC) + timedelta(days=10)
+
+    with patch(
+        'app.services.remnawave_webhook_service.get_open_grace_subscription_ids',
+        AsyncMock(return_value=set()),
+    ):
+        await svc._handle_user_modified(AsyncMock(), _user(), sub, {'status': 'ACTIVE'})
+
+    svc._handle_expire_squads.assert_not_awaited()

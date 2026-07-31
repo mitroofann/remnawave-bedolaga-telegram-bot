@@ -286,12 +286,18 @@ def apply_restore_fields(subscription: Subscription) -> bool:
     дублей), очищает маркеры ``expire_disabled_squads`` и ``expire_free_until``. Коммит и
     синхронизацию с панелью делает вызывающий (reset-флоу продления/смены тарифа сам пушит
     connected_squads). Возвращает True, если было что восстанавливать.
+
+    Ветка B: во free-окне ``connected_squads`` содержит выданный free-сквад, а реальные лежат
+    в ``expire_disabled_squads``. При восстановлении free-сквад надо УБРАТЬ (подписка снова
+    платная), иначе он залипнет рядом с реальными. Поэтому перед merge вычитаем free-сквады
+    тарифа из текущего ``connected``. Ветка A: ``connected`` пуст → вычитать нечего.
     """
     if not has_expire_disabled_squads(subscription):
         return False
 
     disabled = list(subscription.expire_disabled_squads or [])
-    connected = list(subscription.connected_squads or [])
+    free_squads = set(_tariff_free_squads(subscription))
+    connected = [uuid for uuid in (subscription.connected_squads or []) if uuid not in free_squads]
     merged = connected + [uuid for uuid in disabled if uuid not in connected]
 
     subscription.connected_squads = merged
