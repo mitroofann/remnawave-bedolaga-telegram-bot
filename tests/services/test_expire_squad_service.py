@@ -332,23 +332,28 @@ async def _run_push(status, expire_at):
 
 
 @pytest.mark.anyio
-async def test_push_to_panel_expired_omits_status():
-    """EXPIRED панель вычисляет сама по прошедшему expireAt; слать его в PATCH →
-    Validation failed и откат (сквады не снимутся). Поэтому status НЕ отправляем."""
+async def test_push_to_panel_expired_omits_status_and_past_expire():
+    """Ветка A: панель отвергает и status=EXPIRED (вычисляемый), и expireAt в прошлом
+    (Validation failed → откат, сквады не снимутся). Поэтому НЕ шлём ни статус, ни
+    прошлый expireAt — только пустой список сквадов."""
     from app.database.models import SubscriptionStatus
 
-    ok, kwargs = await _run_push(SubscriptionStatus.EXPIRED, datetime(2026, 7, 1, tzinfo=UTC))
+    past = datetime.now(UTC) - timedelta(days=1)
+    ok, kwargs = await _run_push(SubscriptionStatus.EXPIRED, past)
     assert ok is True
     assert kwargs['status'] is None
+    assert kwargs['expire_at'] is None
     assert kwargs['active_internal_squads'] == []
 
 
 @pytest.mark.anyio
-async def test_push_to_panel_active_sends_status():
-    """Ветка B: expireAt в будущем, статус ACTIVE шлём явно."""
+async def test_push_to_panel_active_sends_status_and_future_expire():
+    """Ветка B: expireAt в будущем — шлём его и статус ACTIVE явно."""
     from app.database.models import SubscriptionStatus
     from app.external.remnawave_api import UserStatus
 
-    ok, kwargs = await _run_push(SubscriptionStatus.ACTIVE, datetime(2026, 8, 1, tzinfo=UTC))
+    future = datetime.now(UTC) + timedelta(days=7)
+    ok, kwargs = await _run_push(SubscriptionStatus.ACTIVE, future)
     assert ok is True
     assert kwargs['status'] == UserStatus.ACTIVE
+    assert kwargs['expire_at'] == future

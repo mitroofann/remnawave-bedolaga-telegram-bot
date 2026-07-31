@@ -356,10 +356,14 @@ async def _push_to_panel(
     прошлый expire, убив free-окно. Здесь пушим ровно то, что решила фича. Пустой список
     сквадов ``[]`` доходит корректно (гард update_user = ``is not None``).
 
-    ВАЖНО: ``EXPIRED`` — ВЫЧИСЛЯЕМЫЙ панелью статус (по прошедшему expireAt), его НЕЛЬЗЯ
-    задать в PATCH — панель отвечает ``Validation failed`` и откатывает весь запрос (сквады
-    не снимутся). Поэтому для ветки A статус НЕ шлём вовсе: expireAt уже в прошлом, панель
-    сама выставит EXPIRED. Для ветки B шлём ACTIVE явно (там expireAt в будущем).
+    ВАЖНО: панель RemnaWave валидирует PATCH /api/users и отклоняет ВЕСЬ запрос
+    (``Validation failed``, сквады не снимутся) при ЛЮБОМ из нарушений:
+    - ``status`` = LIMITED/EXPIRED — эти статусы ВЫЧИСЛЯЕМЫЕ, задать нельзя (валидны только
+      ACTIVE/DISABLED). Для ветки A статус НЕ шлём вовсе — панель сама выставит EXPIRED по
+      прошедшему expireAt. Для ветки B шлём ACTIVE явно (там expireAt в будущем).
+    - ``expireAt`` в прошлом — «Expiration date cannot be in the past». Для ветки A expireAt
+      трогать НЕ нужно (он уже прошлый на панели, потому и истекло) — НЕ шлём его. Для ветки B
+      он в будущем — шлём. Правило: отправляем expire_at только если он строго в будущем.
     """
     try:
         from app.external.remnawave_api import UserStatus
@@ -367,12 +371,15 @@ async def _push_to_panel(
 
         # ACTIVE шлём явно; EXPIRED — не шлём (панель вычислит из прошлого expireAt).
         panel_status = UserStatus.ACTIVE if status == SubscriptionStatus.ACTIVE else None
+        # expireAt шлём ТОЛЬКО если он в будущем (ветка B). Прошлый expireAt панель отвергает,
+        # а для ветки A менять срок и не нужно — снимаем лишь сквады.
+        expire_at_arg = expire_at if (expire_at is not None and expire_at > datetime.now(UTC)) else None
         service = SubscriptionService()
         async with service.get_api_client() as api:
             await api.update_user(
                 uuid=panel_uuid,
                 status=panel_status,
-                expire_at=expire_at,
+                expire_at=expire_at_arg,
                 active_internal_squads=list(active_squads),
             )
         return True
