@@ -2615,11 +2615,20 @@ class MonitoringService:
                 select(Subscription)
                 .options(selectinload(Subscription.tariff))
                 .where(
-                    or_(
-                        # (а) ещё живые по статусу, но истёкшие по дате — кандидаты на обработку
-                        Subscription.status.in_(['active', 'trial']),
-                        # (б) уже с активной фичей (free-окно или отложенные сквады)
-                        Subscription.expire_free_until.isnot(None),
+                    and_(
+                        or_(
+                            # (а) ещё живые по статусу, но истёкшие по дате — кандидаты на обработку
+                            Subscription.status.in_(['active', 'trial']),
+                            # (б) уже с активной фичей (free-окно или отложенные сквады)
+                            Subscription.expire_free_until.isnot(None),
+                        ),
+                        # Сужаем на стороне БД: сканер крутится раз в минуту, поэтому
+                        # тянем только реальных кандидатов — истёкшие по дате (а) или с
+                        # завершившимся free-окном (б), а не всю активную базу.
+                        or_(
+                            Subscription.end_date <= now,
+                            Subscription.expire_free_until <= now,
+                        ),
                     )
                 )
             )
