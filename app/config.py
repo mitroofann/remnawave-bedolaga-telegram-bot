@@ -508,6 +508,10 @@ class Settings(BaseSettings):
 
     SUBSCRIPTION_RENEWAL_BALANCE_THRESHOLD_KOPEKS: int = 20000
 
+    # Интервал отдельного fallback-сканера истечения сквадов (секунды).
+    # Не зависит от общего часового мониторинга: нужен быстрый A/B fallback, если webhook не пришёл.
+    EXPIRE_SQUADS_CHECK_INTERVAL_SECONDS: int = 60
+
     MONITORING_INTERVAL: int = 60
     # Жёсткий per-send таймаут (сек) на отправку уведомлений из MonitoringService.
     # Дефолтный session timeout aiogram = 60s; при медленном канале до Telegram

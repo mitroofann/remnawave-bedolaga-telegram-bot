@@ -206,6 +206,7 @@ class MonitoringService:
         self._notified_users: set[str] = set()
         self._last_cleanup = datetime.now(UTC)
         self._sla_task = None
+        self._expire_squads_task = None
         # In-memory fallback состояния уведомлений об ошибке автоплатежа (на случай
         # недоступности Redis). Ключ — (subscription_id, cycle_token=int(end_date.timestamp())).
         self._autopay_fail_state: dict[tuple[int, int], dict] = {}
@@ -328,6 +329,12 @@ class MonitoringService:
         except Exception as e:
             logger.error('Не удалось запустить SLA-мониторинг', error=e)
 
+        try:
+            if not self._expire_squads_task or self._expire_squads_task.done():
+                self._expire_squads_task = asyncio.create_task(self._expire_squads_loop())
+        except Exception as e:
+            logger.error('Не удалось запустить мониторинг истечения сквадов', error=e)
+
         while self.is_running:
             try:
                 await self._monitoring_cycle()
@@ -343,8 +350,31 @@ class MonitoringService:
         try:
             if self._sla_task and not self._sla_task.done():
                 self._sla_task.cancel()
+            if self._expire_squads_task and not self._expire_squads_task.done():
+                self._expire_squads_task.cancel()
         except Exception:
             pass
+
+    async def _expire_squads_loop(self):
+        try:
+            interval_seconds = max(10, int(getattr(settings, 'EXPIRE_SQUADS_CHECK_INTERVAL_SECONDS', 60)))
+        except Exception:
+            interval_seconds = 60
+
+        while self.is_running:
+            try:
+                async with AsyncSessionLocal() as db:
+                    try:
+                        await self._check_expire_squads(db)
+                        await db.commit()
+                    except Exception as error:
+                        logger.error('Ошибка в проверке истечения сквадов', error=error)
+                        await db.rollback()
+            except asyncio.CancelledError:
+                break
+            except Exception as error:
+                logger.error('Ошибка в цикле проверки истечения сквадов', error=error)
+            await asyncio.sleep(interval_seconds)
 
     async def _monitoring_cycle(self):
         async with AsyncSessionLocal() as db:
@@ -397,7 +427,6 @@ class MonitoringService:
                 await self._check_trial_channel_subscriptions(db)
                 await self._check_expired_subscription_followups(db)
                 await self._check_traffic_limit_squads(db)
-                await self._check_expire_squads(db)
                 await self._check_traffic_warnings(db)
                 await self._check_low_balance_alerts(db)
                 await self._retry_stuck_guest_purchases(db)
@@ -2626,6 +2655,19 @@ class MonitoringService:
 
                     if await _ess.handle_expiration_by_id(db, subscription.id):
                         handled_count += 1
+                        # [Форк] Быстрый сканер — единственный владелец этого перехода
+                        # (в часовом цикле он больше не вызывается), а вебхук мог не прийти.
+                        # Значит уведомить обязаны здесь: ветка B → «бесплатный доступ»,
+                        # ветка A → «подписка истекла». Повторные сканы сюда не доходят
+                        # (guard has_expire_disabled_squads выше), так что дублей нет.
+                        try:
+                            await self._notify_expire_handled(db, subscription)
+                        except Exception as notify_err:
+                            logger.error(
+                                'expire-squad: ошибка уведомления в сканере',
+                                subscription_id=subscription.id,
+                                error=notify_err,
+                            )
                 except Exception as handle_err:
                     logger.error(
                         'expire-squad: ошибка обработки в мониторинге',
@@ -2641,6 +2683,44 @@ class MonitoringService:
                 )
         except Exception as e:
             logger.error('Ошибка проверки снятия сквадов при истечении', error=e)
+
+    async def _notify_expire_handled(self, db: AsyncSession, subscription: Subscription):
+        """[Форк] Уведомить юзера после обработки истечения быстрым сканером.
+
+        Быстрый сканер — единственный владелец первого перехода (в часовом цикле
+        ``_check_expire_squads`` больше не вызывается), поэтому уведомление, которое раньше
+        слал часовой ``_check_expired_subscriptions``, теперь обязано уйти отсюда.
+        Ветка B (free-окно активно) → «бесплатный доступ»; ветка A → «подписка истекла».
+        Мульти-тариф: не шлём, если у юзера есть другая ACTIVE-подписка.
+        """
+        from app.services import expire_squad_service as _ess
+
+        if not self.bot:
+            return
+
+        user = await get_user_by_id(db, subscription.user_id)
+        if not user:
+            return
+
+        if settings.is_multi_tariff_enabled():
+            other_active = await db.execute(
+                select(Subscription.id)
+                .where(
+                    Subscription.user_id == user.id,
+                    Subscription.id != subscription.id,
+                    Subscription.status == SubscriptionStatus.ACTIVE.value,
+                    Subscription.end_date > datetime.now(UTC),
+                )
+                .limit(1)
+            )
+            if other_active.scalar_one_or_none() is not None:
+                return
+
+        if _ess.is_free_window_active(subscription):
+            await self._send_expire_free_notification(user, subscription)
+        else:
+            tariff_name = subscription.tariff.name if getattr(subscription, 'tariff', None) else None
+            await self._send_subscription_expired_notification(user, subscription, tariff_name=tariff_name)
 
     async def _check_traffic_warnings(self, db: AsyncSession):
         """Check subscriptions approaching traffic limit and notify users."""
