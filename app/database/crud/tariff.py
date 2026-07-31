@@ -203,6 +203,8 @@ async def create_tariff(
     # Внешний сквад RemnaWave
     external_squad_uuid: str | None = None,
     limit_disabled_squads: list[str] | None = None,
+    expire_free_squads: list[str] | None = None,
+    expire_free_days: int | None = None,
 ) -> Tariff:
     """Создает новый тариф."""
     normalized_prices = _normalize_period_prices(period_prices)
@@ -246,6 +248,9 @@ async def create_tariff(
         external_squad_uuid=external_squad_uuid,
         # [Форк] Сквады, гасимые при исчерпании трафика
         limit_disabled_squads=limit_disabled_squads or [],
+        # [Форк] Free-сквады при истечении + срок доступа
+        expire_free_squads=expire_free_squads or [],
+        expire_free_days=expire_free_days or 0,
     )
 
     db.add(tariff)
@@ -319,6 +324,8 @@ async def update_tariff(
     external_squad_uuid: str | None = ...,  # ... = не передан, None = убрать внешний сквад
     # [Форк] Сквады, гасимые при исчерпании трафика
     limit_disabled_squads: list[str] | None = None,
+    expire_free_squads: list[str] | None = None,
+    expire_free_days: int | None = None,
 ) -> Tariff:
     """Обновляет существующий тариф."""
     if name is not None:
@@ -397,6 +404,11 @@ async def update_tariff(
     # [Форк] Сквады, гасимые при исчерпании трафика
     if limit_disabled_squads is not None:
         tariff.limit_disabled_squads = limit_disabled_squads
+    # [Форк] Free-сквады при истечении + срок доступа
+    if expire_free_squads is not None:
+        tariff.expire_free_squads = expire_free_squads
+    if expire_free_days is not None:
+        tariff.expire_free_days = expire_free_days
 
     # Обновляем промогруппы если указаны
     if promo_group_ids is not None:

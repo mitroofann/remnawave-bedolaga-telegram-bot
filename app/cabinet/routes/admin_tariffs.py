@@ -275,6 +275,9 @@ async def get_tariff(
         external_squad_uuid=tariff.external_squad_uuid,
         # [Форк] Сквады, гасимые при исчерпании трафика
         limit_disabled_squads=tariff.limit_disabled_squads or [],
+        # [Форк] Free-сквады при истечении + срок доступа
+        expire_free_squads=tariff.expire_free_squads or [],
+        expire_free_days=tariff.expire_free_days or 0,
         # Показывать в подарках
         show_in_gift=tariff.show_in_gift,
         created_at=tariff.created_at,
@@ -336,6 +339,9 @@ async def create_new_tariff(
         external_squad_uuid=request.external_squad_uuid,
         # [Форк] Сквады, гасимые при исчерпании трафика
         limit_disabled_squads=request.limit_disabled_squads,
+        # [Форк] Free-сквады при истечении + срок доступа
+        expire_free_squads=request.expire_free_squads,
+        expire_free_days=request.expire_free_days,
         # Показывать в подарках
         show_in_gift=request.show_in_gift,
     )
@@ -439,6 +445,11 @@ async def update_existing_tariff(
     # [Форк] Сквады, гасимые при исчерпании трафика
     if request.limit_disabled_squads is not None:
         updates['limit_disabled_squads'] = request.limit_disabled_squads
+    # [Форк] Free-сквады при истечении + срок доступа
+    if request.expire_free_squads is not None:
+        updates['expire_free_squads'] = request.expire_free_squads
+    if request.expire_free_days is not None:
+        updates['expire_free_days'] = request.expire_free_days
     # Показывать в подарках
     if request.show_in_gift is not None:
         updates['show_in_gift'] = request.show_in_gift

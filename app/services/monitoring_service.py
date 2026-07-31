@@ -46,6 +46,7 @@ from app.database.models import (
     User,
     UserPromoGroup,
     UserStatus,
+    _aware,
 )
 from app.external.remnawave_api import (
     RemnaWaveAPIError,
@@ -396,6 +397,7 @@ class MonitoringService:
                 await self._check_trial_channel_subscriptions(db)
                 await self._check_expired_subscription_followups(db)
                 await self._check_traffic_limit_squads(db)
+                await self._check_expire_squads(db)
                 await self._check_traffic_warnings(db)
                 await self._check_low_balance_alerts(db)
                 await self._retry_stuck_guest_purchases(db)
@@ -549,9 +551,32 @@ class MonitoringService:
                 # Capture tariff name before expire_subscription's db.refresh() expires the relationship
                 _tariff_name = subscription.tariff.name if getattr(subscription, 'tariff', None) else None
 
-                await expire_subscription(db, subscription)
-
                 user = await get_user_by_id(db, subscription.user_id)
+
+                # [Форк] Фича снятия сквадов при истечении. Если применима — снимаем сквады (A)
+                # или выдаём free-сквад (B) через handle_expiration; иначе штатный expire.
+                # Ветка B держит статус ACTIVE (free-окно), уведомление шлёт вебхук
+                # _handle_user_expired; ветка A сама выставляет EXPIRED.
+                from app.services import expire_squad_service as _ess
+
+                handled_by_expire_squad = False
+                if _ess.should_handle_on_expiry(subscription):
+                    try:
+                        handled_by_expire_squad = await _ess.handle_expiration(db, user, subscription)
+                    except Exception as _ess_err:
+                        logger.error(
+                            'expire-squad: ошибка обработки истечения в мониторинге',
+                            subscription_id=subscription.id,
+                            error=_ess_err,
+                        )
+
+                if not handled_by_expire_squad:
+                    await expire_subscription(db, subscription)
+
+                # [Форк] Ветка B (free-окно активно): доступ продолжается — шлём уведомление о
+                # бесплатном доступе, а НЕ «подписка истекла» (иначе введём юзера в заблуждение).
+                free_window_started = handled_by_expire_squad and _ess.is_free_window_active(subscription)
+
                 if user and self.bot:
                     # Skip notification if user has another ACTIVE subscription (multi-tariff)
                     skip_notify = False
@@ -568,11 +593,24 @@ class MonitoringService:
                         )
                         skip_notify = other_active.scalar_one_or_none() is not None
                     if not skip_notify:
-                        await self._send_subscription_expired_notification(user, subscription, tariff_name=_tariff_name)
+                        if free_window_started:
+                            await self._send_expire_free_notification(user, subscription)
+                        else:
+                            await self._send_subscription_expired_notification(
+                                user, subscription, tariff_name=_tariff_name
+                            )
 
-                logger.info(
-                    "🔴 Подписка пользователя истекла и статус изменен на 'expired'", user_id=subscription.user_id
-                )
+                if free_window_started:
+                    logger.info(
+                        '🟡 Подписка истекла, выдан бесплатный доступ (free-окно)',
+                        user_id=subscription.user_id,
+                        subscription_id=subscription.id,
+                    )
+                else:
+                    logger.info(
+                        "🔴 Подписка пользователя истекла и статус изменен на 'expired'",
+                        user_id=subscription.user_id,
+                    )
 
             if expired_subscriptions:
                 await self._log_monitoring_event(
@@ -626,6 +664,8 @@ class MonitoringService:
             current_time = datetime.now(UTC)
             is_active = subscription.status == SubscriptionStatus.ACTIVE.value and subscription.end_date > current_time
 
+            from app.services import expire_squad_service as _ess
+
             if subscription.status == SubscriptionStatus.ACTIVE.value and subscription.end_date <= current_time:
                 # Суточные подписки управляются DailySubscriptionService — не экспайрим
                 tariff = getattr(subscription, 'tariff', None)
@@ -634,10 +674,15 @@ class MonitoringService:
                     and getattr(tariff, 'is_daily', False)
                     and not getattr(subscription, 'is_daily_paused', False)
                 )
-                if is_active_daily:
+                # [Форк] Во free-окне (expire_squad_service ветка B) end_date уже в прошлом, но
+                # доступ через free-сквад ещё активен панельно — не флипаем в EXPIRED.
+                is_free_window = _ess.is_free_window_active(subscription, now=current_time)
+                if is_active_daily or is_free_window:
                     logger.debug(
-                        'update_remnawave_user: пропуск expire для суточной подписки',
+                        'update_remnawave_user: пропуск expire (суточная/free-окно)',
                         subscription_id=subscription.id,
+                        is_active_daily=is_active_daily,
+                        is_free_window=is_free_window,
                     )
                 else:
                     subscription.status = SubscriptionStatus.EXPIRED.value
@@ -1812,6 +1857,62 @@ class MonitoringService:
             )
             return False
 
+    async def _send_expire_free_notification(self, user: User, subscription: Subscription) -> bool:
+        """[Форк] Уведомление о выдаче бесплатного доступа при истечении (ветка B).
+
+        Шлётся из мониторинга, когда free-окно активировано не вебхуком (single-tariff/лаг).
+        Формат — тот же ключ WEBHOOK_SUB_EXPIRE_FREE, что и в вебхуке.
+        """
+        try:
+            if not user.telegram_id:
+                return False
+
+            from app.database.models import _aware
+            from app.handlers.subscription.devices import get_servers_display_names
+
+            texts = get_texts(user.language)
+            free_squads = list(subscription.connected_squads or [])
+            server_names = await get_servers_display_names(free_squads)
+
+            days = 0
+            until = _aware(getattr(subscription, 'expire_free_until', None))
+            if until is not None:
+                days = max((until - datetime.now(UTC)).days, 0)
+
+            message = texts.t('WEBHOOK_SUB_EXPIRE_FREE', '').format(server_names=server_names, days_left=str(days))
+            if not message:
+                return False
+
+            from aiogram.types import InlineKeyboardMarkup
+
+            extend_callback = f'se:{subscription.id}' if settings.is_multi_tariff_enabled() else 'subscription_extend'
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [build_miniapp_or_callback_button(text='💎 Продлить подписку', callback_data=extend_callback)],
+                ]
+            )
+
+            await self._send_message_with_logo(
+                chat_id=user.telegram_id,
+                text=message,
+                parse_mode='HTML',
+                reply_markup=keyboard,
+            )
+            return True
+
+        except (TelegramForbiddenError, TelegramBadRequest) as exc:
+            if await self._handle_unreachable_user(user, exc, 'уведомление о бесплатном доступе'):
+                return True
+            logger.error(
+                'Ошибка Telegram API при отправке уведомления о бесплатном доступе',
+                telegram_id=user.telegram_id,
+                exc=exc,
+            )
+            return False
+        except Exception as e:
+            logger.error('Ошибка отправки уведомления о бесплатном доступе', telegram_id=user.telegram_id, e=e)
+            return False
+
     async def _send_subscription_expiring_notification(
         self, user: User, subscription: Subscription, days: int, *, has_saved_card: bool = False
     ) -> bool:
@@ -2457,6 +2558,89 @@ class MonitoringService:
                 logger.info('traffic-limit-squad: погашено сквадов в мониторинге', count=disabled_count)
         except Exception as e:
             logger.error('Ошибка проверки лимит-сквадов трафика', error=e)
+
+    async def _check_expire_squads(self, db: AsyncSession):
+        """[Форк] Периодический fallback снятия сквадов при истечении + завершение free-окна.
+
+        Две задачи (независимо от вебхуков/режима):
+        (а) fallback — ACTIVE-подписки с прошедшим end_date, ещё не обработанные фичей →
+            handle_expiration (ветка A снимет все сквады + EXPIRED, ветка B выдаст free-сквад);
+        (б) finalize — подписки с истёкшим free-окном (expire_free_until <= now) →
+            finalize_expired (снять free-сквад, перевести в EXPIRED).
+        Идемпотентно. См. expire_squad_service.
+        """
+        from app.services import expire_squad_service as _ess
+
+        if not _ess.is_enabled():
+            return
+
+        try:
+            from sqlalchemy import or_, select
+            from sqlalchemy.orm import selectinload
+
+            from app.database.models import Subscription
+
+            now = datetime.now(UTC)
+
+            result = await db.execute(
+                select(Subscription)
+                .options(selectinload(Subscription.tariff))
+                .where(
+                    or_(
+                        # (а) ещё живые по статусу, но истёкшие по дате — кандидаты на обработку
+                        Subscription.status.in_(['active', 'trial']),
+                        # (б) уже с активной фичей (free-окно или отложенные сквады)
+                        Subscription.expire_free_until.isnot(None),
+                    )
+                )
+            )
+            subscriptions = result.scalars().all()
+
+            handled_count = 0
+            finalized_count = 0
+            for subscription in subscriptions:
+                try:
+                    # (б) free-окно истекло → завершаем (снимаем free-сквад, EXPIRED).
+                    until = _aware(getattr(subscription, 'expire_free_until', None))
+                    if until is not None and until <= now:
+                        if await _ess.finalize_expired(db, subscription):
+                            finalized_count += 1
+                        continue
+
+                    # Пока free-окно активно — ничего не делаем.
+                    if _ess.is_free_window_active(subscription, now=now):
+                        continue
+
+                    # Уже обработана (сквады отложены) — идемпотентно пропускаем.
+                    if _ess.has_expire_disabled_squads(subscription):
+                        continue
+
+                    # (а) истекла по дате, но фича ещё не применена → обработать.
+                    end = _aware(subscription.end_date)
+                    if end is None or end > now:
+                        continue
+                    if subscription.status not in ('active', 'trial'):
+                        continue
+                    if not _ess.should_handle_on_expiry(subscription):
+                        continue
+
+                    if await _ess.handle_expiration_by_id(db, subscription.id):
+                        handled_count += 1
+                except Exception as handle_err:
+                    logger.error(
+                        'expire-squad: ошибка обработки в мониторинге',
+                        subscription_id=subscription.id,
+                        error=handle_err,
+                    )
+
+            if handled_count or finalized_count:
+                logger.info(
+                    'expire-squad: обработано в мониторинге',
+                    handled=handled_count,
+                    finalized=finalized_count,
+                )
+        except Exception as e:
+            logger.error('Ошибка проверки снятия сквадов при истечении', error=e)
 
     async def _check_traffic_warnings(self, db: AsyncSession):
         """Check subscriptions approaching traffic limit and notify users."""

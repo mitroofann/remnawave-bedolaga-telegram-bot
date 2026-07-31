@@ -120,6 +120,10 @@ class TariffDetailResponse(BaseModel):
     # [Форк] Сквады (UUID), которые гасятся у юзера при исчерпании трафика
     # (CUSTOM_TRAFFIC_LIMIT_SQUAD_ENABLED). Подмножество allowed_squads.
     limit_disabled_squads: list[str] = Field(default_factory=list)
+    # [Форк] Free-сквады при истечении подписки + срок доступа в днях
+    # (CUSTOM_EXPIRE_CLEAR_SQUADS_ENABLED, ветка B). Пусто/0 = снять все сквады (ветка A).
+    expire_free_squads: list[str] = Field(default_factory=list)
+    expire_free_days: int = 0
     # Показывать в подарках
     show_in_gift: bool = True
     created_at: datetime
@@ -182,6 +186,9 @@ class TariffCreateRequest(BaseModel):
     external_squad_uuid: str | None = Field(None, pattern=UUID_PATTERN)
     # [Форк] Сквады, гасимые при исчерпании трафика (подмножество allowed_squads)
     limit_disabled_squads: list[str] = Field(default_factory=list, description='Server UUIDs disabled on traffic limit')
+    # [Форк] Free-сквады при истечении + срок в днях (ветка B; пусто/0 = ветка A «снять все»)
+    expire_free_squads: list[str] = Field(default_factory=list, description='Free server UUIDs on expiration')
+    expire_free_days: int = Field(0, ge=0, description='Days of free-squad access after expiration')
     # Показывать в подарках
     show_in_gift: bool = True
 
@@ -226,6 +233,9 @@ class TariffUpdateRequest(BaseModel):
     external_squad_uuid: str | None = Field(None, pattern=UUID_PATTERN)
     # [Форк] Сквады, гасимые при исчерпании трафика (подмножество allowed_squads)
     limit_disabled_squads: list[str] | None = None
+    # [Форк] Free-сквады при истечении + срок в днях (ветка B; пусто/0 = ветка A «снять все»)
+    expire_free_squads: list[str] | None = None
+    expire_free_days: int | None = Field(None, ge=0)
     # Показывать в подарках
     show_in_gift: bool | None = None
 

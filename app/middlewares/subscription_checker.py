@@ -7,6 +7,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject
 
 from app.database.models import SubscriptionStatus
+from app.services import expire_squad_service
 
 
 logger = structlog.get_logger(__name__)
@@ -46,11 +47,15 @@ class SubscriptionStatusMiddleware(BaseMiddleware):
                     tariff = getattr(subscription, 'tariff', None)
                     is_active_daily = tariff and getattr(tariff, 'is_daily', False) and not subscription.is_daily_paused
 
+                    # [Форк] Пока активно free-окно (сквад выдан при истечении, expire_squad_service
+                    # ветка B) — панельный expireAt в будущем, а end_date в прошлом. Не флипаем в
+                    # EXPIRED, иначе доступ по free-скваду оборвётся на первом же заходе юзера.
                     if (
                         subscription.status == SubscriptionStatus.ACTIVE.value
                         and subscription.end_date
                         and subscription.end_date <= current_time
                         and not is_active_daily
+                        and not expire_squad_service.is_free_window_active(subscription, now=current_time)
                     ):
                         time_since_expiry = current_time - subscription.end_date
 

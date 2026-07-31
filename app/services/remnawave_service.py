@@ -1994,6 +1994,9 @@ class RemnaWaveService:
             # Собираем в цикле, обрабатываем ПОСЛЕ финального commit (панельный push
             # нельзя делать в середине батча). См. traffic_limit_squad_service.
             limit_squad_candidates: list[int] = []
+            # [Форк] Подписки, которым при истечении нужно снять сквады (ветка A) или выдать
+            # free-сквад (ветка B). См. expire_squad_service. Обрабатываем так же после commit.
+            expire_squad_candidates: list[int] = []
             for panel_user in panel_users:
                 panel_uuid = panel_user.get('uuid')
                 if not panel_uuid:
@@ -2188,13 +2191,22 @@ class RemnaWaveService:
                                 SubscriptionStatus.TRIAL.value,
                                 SubscriptionStatus.LIMITED.value,
                             ):
-                                is_fresh = local_end >= now - timedelta(
-                                    minutes=settings.GRACE_ACCESS_CANDIDATE_LOOKBACK_MINUTES
-                                )
-                                subscription.status = SubscriptionStatus.EXPIRED.value
-                                if is_fresh:
-                                    subscription.grace_candidate_reason = 'expired'
-                                    subscription.grace_candidate_at = now
+                                # [Форк] Фича снятия сквадов при истечении: вместо простого флипа
+                                # в EXPIRED — снять сквады (A) / выдать free-сквад (B) после коммита.
+                                from app.services import expire_squad_service as _ess
+
+                                if _ess.should_handle_on_expiry(subscription):
+                                    if not _ess.has_expire_disabled_squads(subscription):
+                                        expire_squad_candidates.append(subscription.id)
+                                    # Статус выставит handle_expiration (EXPIRED для A, ACTIVE для B).
+                                else:
+                                    is_fresh = local_end >= now - timedelta(
+                                        minutes=settings.GRACE_ACCESS_CANDIDATE_LOOKBACK_MINUTES
+                                    )
+                                    subscription.status = SubscriptionStatus.EXPIRED.value
+                                    if is_fresh:
+                                        subscription.grace_candidate_reason = 'expired'
+                                        subscription.grace_candidate_at = now
 
                     # traffic_limit_gb: bot is source of truth, do not overwrite from panel
 
@@ -2218,11 +2230,12 @@ class RemnaWaveService:
                                 _squad_uuids.append(_sq)
                     # [Форк] Не синхронизируем connected_squads пока сквады погашены по
                     # лимиту (панель может отдать полный список из-за лага применения).
-                    from app.services import traffic_limit_squad_service as _tls_sq2
+                    from app.services import expire_squad_service as _ess2, traffic_limit_squad_service as _tls_sq2
 
                     if (
                         not grace_open
                         and not _tls_sq2.has_disabled_squads(subscription)
+                        and not _ess2.has_expire_disabled_squads(subscription)
                         and _squad_uuids
                         and set(_squad_uuids) != set(subscription.connected_squads or [])
                     ):
@@ -2252,6 +2265,20 @@ class RemnaWaveService:
                             'traffic-limit-squad: ошибка гашения сквадов в sync',
                             subscription_id=_sub_id,
                             error=_tls_err,
+                        )
+
+            # [Форк] Пост-обработка кандидатов на снятие сквадов при истечении (после commit).
+            if expire_squad_candidates:
+                from app.services import expire_squad_service as _ess
+
+                for _sub_id in expire_squad_candidates:
+                    try:
+                        await _ess.handle_expiration_by_id(db, _sub_id)
+                    except Exception as _ess_err:
+                        logger.error(
+                            'expire-squad: ошибка обработки истечения в sync',
+                            subscription_id=_sub_id,
+                            error=_ess_err,
                         )
 
             logger.info(
@@ -2390,7 +2417,15 @@ class RemnaWaveService:
             panel_status = panel_user.get('status', 'ACTIVE')
             expire_at_str = panel_user.get('expireAt', '')
 
-            if expire_at_str and not grace_open:
+            # [Форк] Пока активно free-окно (expire_squad_service ветка B) мы сами запушили на
+            # панель expireAt = now + N дней, тогда как реальный end_date уже в прошлом. Панель
+            # вернёт ACTIVE + этот будущий expireAt → блок ниже затёр бы реальный end_date будущей
+            # датой = порча биллинга. Короткое замыкание: не синкаем end_date из панели во free-окне.
+            from app.services import expire_squad_service as _ess
+
+            free_window = _ess.is_free_window_active(subscription, now=self._now_utc())
+
+            if expire_at_str and not grace_open and not free_window:
                 # expire_at приходит в UTC (naive) из _parse_remnawave_date
                 expire_at = self._parse_remnawave_date(expire_at_str)
 
@@ -2506,9 +2541,12 @@ class RemnaWaveService:
             # traffic_limit_disabled_squads. Восстановление идёт своим путём.
             from app.services import traffic_limit_squad_service as _tls_sq
 
+            # [Форк] Аналогично: пока сквады отложены при истечении (expire_squad_service, A/B)
+            # не даём панели «вернуть» реальные/затереть free-сквады через connected_squads.
             if (
                 not grace_open
                 and not _tls_sq.has_disabled_squads(subscription)
+                and not _ess.has_expire_disabled_squads(subscription)
                 and panel_squad_uuids
                 and set(panel_squad_uuids) != set(subscription.connected_squads or [])
             ):

@@ -1912,6 +1912,14 @@ class Tariff(Base):
     # подписка остаётся ACTIVE. Пустой список = гашение не настроено для тарифа.
     limit_disabled_squads = Column(JSON, default=list)
 
+    # [Форк] Фича «free-сквад при истечении подписки» (CUSTOM_EXPIRE_CLEAR_SQUADS_ENABLED, ветка B).
+    # UUID сквадов, которые ставятся юзеру ВМЕСТО его реальных при истечении подписки (можно
+    # несколько). Пустой список = ветка B выключена для тарифа → работает ветка A (снять все сквады).
+    expire_free_squads = Column(JSON, default=list)
+    # Сколько дней доступен free-сквад после истечения (панельный expireAt = now + N дней).
+    # 0 = ветка B выключена (парно с expire_free_squads: работает только если оба заданы).
+    expire_free_days = Column(Integer, default=0, server_default='0', nullable=False)
+
     created_at = Column(AwareDateTime(), default=func.now())
     updated_at = Column(AwareDateTime(), default=func.now(), onupdate=func.now())
 
@@ -2320,6 +2328,16 @@ class Subscription(Base):
     # выбила юзера повторно. subscription.traffic_limit_gb НЕ меняется (в боте видно тарифный
     # лимит). None = сквады не гасились. См. traffic_limit_squad_service.panel_traffic_limit_bytes.
     traffic_limit_panel_bytes = Column(BigInteger, nullable=True)
+
+    # [Форк] Фича «снятие сквадов при истечении подписки» (CUSTOM_EXPIRE_CLEAR_SQUADS_ENABLED
+    # + пер-тариф free-сквад). Оригинальные сквады юзера, отложенные при истечении (и для A —
+    # снять все сквады, и для B — free-сквад). Непустой список = фича активна для подписки.
+    # При продлении/смене тарифа возвращаются в connected_squads, поле очищается.
+    expire_disabled_squads = Column(JSON, default=list)
+    # Панельный expireAt (now + expire_free_days), который мы запушили в панель во время free-окна
+    # (фича B). Одновременно маркер, что free-окно активно. None = фича A / free-окно неактивно.
+    # Реальный subscription.end_date НЕ трогаем — это только панельный сдвиг доступа.
+    expire_free_until = Column(AwareDateTime(), nullable=True)
 
     autopay_enabled = Column(Boolean, default=False)
     autopay_days_before = Column(Integer, default=3)

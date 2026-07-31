@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from sqlalchemy import and_, case, delete, func, select
+from sqlalchemy import and_, case, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -1347,9 +1347,11 @@ async def extend_subscription(
     # только поля (без panel I/O) — последующий push вызывателя (update_remnawave_user,
     # sync_squads=True по умолчанию) пропагирует полный список сквадов + тарифный лимит.
     if days > 0:
-        from app.services import traffic_limit_squad_service
+        from app.services import expire_squad_service, traffic_limit_squad_service
 
         traffic_limit_squad_service.apply_restore_fields(subscription)
+        # [Форк] Аналогично вернуть сквады, отложенные при истечении (A/B) + очистить free-окно.
+        expire_squad_service.apply_restore_fields(subscription)
 
     subscription.updated_at = current_time
 
@@ -1736,6 +1738,14 @@ async def reactivate_subscription(db: AsyncSession, subscription: Subscription, 
         await db.commit()
         await db.refresh(subscription)
 
+    # [Форк] Реактивация мимо extend (повторная подписка на канал, webhook enable): подписка
+    # снова активна по времени — вернуть реальные сквады, отложенные при истечении, и запушить
+    # их на панель. Само-гардируется (мгновенный выход, если восстанавливать нечего).
+    from app.services import expire_squad_service
+
+    if expire_squad_service.has_expire_disabled_squads(subscription):
+        await expire_squad_service.restore_squads(db, subscription, reason='reactivate_subscription')
+
     logger.info(
         '✅ Подписка реактивирована',
         subscription_id=subscription.id,
@@ -1790,6 +1800,12 @@ async def get_expired_subscriptions(db: AsyncSession) -> list[Subscription]:
                 ~and_(
                     Tariff.is_daily.is_(True),
                     Subscription.is_daily_paused.is_(False),
+                ),
+                # [Форк] Во free-окне (expire_squad_service ветка B) end_date в прошлом, но
+                # доступ ещё активен панельно — не отдаём такие подписки на plain-expire.
+                or_(
+                    Subscription.expire_free_until.is_(None),
+                    Subscription.expire_free_until <= datetime.now(UTC),
                 ),
             )
         )
@@ -2265,7 +2281,17 @@ async def check_and_update_subscription_status(db: AsyncSession, subscription: S
         )
         return subscription
 
-    if subscription.status == SubscriptionStatus.ACTIVE.value and subscription.end_date <= current_time:
+    # [Форк] Во free-окне (expire_squad_service ветка B) end_date в прошлом, но доступ ещё
+    # активен панельно — не флипаем в EXPIRED, иначе оборвём free-сквад.
+    from app.services import expire_squad_service as _ess
+
+    is_free_window = _ess.is_free_window_active(subscription, now=current_time)
+
+    if (
+        subscription.status == SubscriptionStatus.ACTIVE.value
+        and subscription.end_date <= current_time
+        and not is_free_window
+    ):
         # Детальное логирование для отладки проблемы с деактивацией
         time_diff = current_time - subscription.end_date
         logger.warning(

@@ -33,9 +33,9 @@ from app.database.crud.subscription import (
     update_subscription_usage,
 )
 from app.database.crud.user import get_user_by_id, get_user_by_remnawave_uuid, get_user_by_telegram_id
-from app.database.models import Subscription, SubscriptionServer, SubscriptionStatus, User
+from app.database.models import Subscription, SubscriptionServer, SubscriptionStatus, User, _aware
 from app.localization.texts import get_texts
-from app.services import traffic_limit_squad_service
+from app.services import expire_squad_service, traffic_limit_squad_service
 from app.services.admin_notification_service import AdminNotificationService
 from app.services.grace_access_runtime import get_open_grace_subscription_ids, grace_access_runtime
 from app.services.grace_access_service import GraceReason
@@ -54,6 +54,8 @@ _TEXT_KEY_TO_NOTIFICATION_TYPE: dict[str, NotificationType] = {
     'WEBHOOK_SUB_LIMITED': NotificationType.WEBHOOK_SUB_LIMITED,
     # [Форк] уведомление о гашении сквада при лимите — тот же тип доставки, что и LIMITED.
     'WEBHOOK_SUB_SQUAD_LIMITED': NotificationType.WEBHOOK_SUB_LIMITED,
+    # [Форк] уведомление о выдаче free-сквада при истечении — тот же тип, что и EXPIRED.
+    'WEBHOOK_SUB_EXPIRE_FREE': NotificationType.WEBHOOK_SUB_EXPIRED,
     'WEBHOOK_SUB_TRAFFIC_RESET': NotificationType.WEBHOOK_SUB_TRAFFIC_RESET,
     'WEBHOOK_SUB_DELETED': NotificationType.WEBHOOK_SUB_DELETED,
     'WEBHOOK_SUB_REVOKED': NotificationType.WEBHOOK_SUB_REVOKED,
@@ -77,6 +79,8 @@ _TEXT_KEY_TO_SETTING: dict[str, str] = {
     'WEBHOOK_SUB_LIMITED': 'WEBHOOK_NOTIFY_SUB_LIMITED',
     # [Форк] управляется тем же тумблером, что и уведомление о лимите трафика.
     'WEBHOOK_SUB_SQUAD_LIMITED': 'WEBHOOK_NOTIFY_SUB_LIMITED',
+    # [Форк] управляется тем же тумблером, что и уведомление об истечении.
+    'WEBHOOK_SUB_EXPIRE_FREE': 'WEBHOOK_NOTIFY_SUB_EXPIRED',
     'WEBHOOK_SUB_TRAFFIC_RESET': 'WEBHOOK_NOTIFY_TRAFFIC_RESET',
     'WEBHOOK_SUB_DELETED': 'WEBHOOK_NOTIFY_SUB_DELETED',
     'WEBHOOK_SUB_REVOKED': 'WEBHOOK_NOTIFY_SUB_REVOKED',
@@ -1053,6 +1057,12 @@ class RemnaWaveWebhookService:
             await db.commit()
             return
 
+        # [Форк] Фича снятия сквадов при истечении: вместо простого EXPIRED снимаем все сквады
+        # (ветка A) либо выдаём free-сквад и держим доступ N дней (ветка B, с уведомлением).
+        # Если фича не применима — падаем в штатную обработку EXPIRED ниже.
+        if await self._handle_expire_squads(db, user, subscription, data):
+            return
+
         candidate_at = datetime.now(UTC)
         subscription.grace_candidate_reason = GraceReason.EXPIRED.value
         subscription.grace_candidate_at = candidate_at
@@ -1075,6 +1085,55 @@ class RemnaWaveWebhookService:
             reply_markup=self._get_renew_keyboard(user, subscription.id),
             subscription=subscription,
         )
+
+    async def _handle_expire_squads(self, db: AsyncSession, user: User, subscription: Subscription, data: dict) -> bool:
+        """[Форк] Снять сквады при истечении (A) / выдать free-сквад (B).
+
+        True = обработано (не делать штатный EXPIRED). Уведомление шлём ТОЛЬКО при первой
+        активации ветки B (выдан free-сквад): у юзера остаётся доступ, это надо объяснить.
+        Для ветки A (все сквады сняты) — ничего нового, штатное поведение.
+        Панель шлёт user.expired повторно — на повторных вызовах молча ре-пушим, без уведомления.
+        """
+        if not expire_squad_service.is_enabled():
+            return False
+
+        already_handled = expire_squad_service.has_expire_disabled_squads(subscription)
+        if not already_handled and not expire_squad_service.should_handle_on_expiry(subscription):
+            return False
+
+        # Ветка B применима, если тариф задаёт free-сквады + дни (до обработки — по тарифу).
+        free_branch = bool(expire_squad_service.resolve_free_squads(subscription))
+
+        handled = await expire_squad_service.handle_expiration(db, user, subscription)
+        if not handled:
+            return False
+
+        self._stamp_webhook_update(subscription)
+
+        # Уведомление — только при ПЕРВОЙ активации ветки B (не на повторных вебхуках, не для A).
+        if not already_handled and free_branch:
+            await self._notify_user(
+                user,
+                'WEBHOOK_SUB_EXPIRE_FREE',
+                reply_markup=self._get_renew_keyboard(user, subscription.id),
+                format_kwargs=await self._expire_free_format_kwargs(subscription),
+                subscription=subscription,
+            )
+        return True
+
+    @staticmethod
+    async def _expire_free_format_kwargs(subscription: Subscription) -> dict:
+        """Плейсхолдеры для WEBHOOK_SUB_EXPIRE_FREE: имена free-серверов и дни доступа."""
+        from app.handlers.subscription.devices import get_servers_display_names
+
+        free_squads = list(subscription.connected_squads or [])
+        names = await get_servers_display_names(free_squads)
+
+        days = 0
+        until = _aware(getattr(subscription, 'expire_free_until', None))
+        if until is not None:
+            days = max((until - datetime.now(UTC)).days, 0)
+        return {'server_names': names, 'days_left': str(days)}
 
     async def _handle_user_disabled(
         self, db: AsyncSession, user: User, subscription: Subscription | None, data: dict
@@ -1501,7 +1560,6 @@ class RemnaWaveWebhookService:
         # that are actually gone (verified via API), leave alive ones untouched.
         await db.refresh(user, ['subscriptions'])
         now = datetime.now(UTC)
-        from app.database.models import _aware
         from app.services.subscription_service import SubscriptionService
 
         subscription_service = SubscriptionService()

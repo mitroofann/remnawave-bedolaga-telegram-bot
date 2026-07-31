@@ -20,7 +20,7 @@ from app.external.remnawave_api import (
     UserStatus,
     is_user_not_found_error,
 )
-from app.services import traffic_limit_squad_service
+from app.services import expire_squad_service, traffic_limit_squad_service
 from app.utils.subscription_utils import (
     resolve_hwid_device_limit_for_payload,
 )
@@ -582,6 +582,18 @@ class SubscriptionService:
                 traffic_limit_squad_service.apply_restore_fields(subscription)
                 logger.info(
                     'traffic-limit-squad: сквады восстановлены при reset_traffic',
+                    subscription_id=subscription.id,
+                    reason=reset_reason,
+                )
+
+            # [Форк] Аналогично: продление/смена тарифа (reset_traffic+sync_squads) = момент
+            # вернуть сквады, отложенные при истечении (expire_squad_service, A/B). Возвращаем
+            # реальные сквады в connected_squads и очищаем маркеры free-окна ДО формирования
+            # payload — ниже он уйдёт с полным списком сквадов и корректным статусом/expire.
+            if reset_traffic and sync_squads and expire_squad_service.has_expire_disabled_squads(subscription):
+                expire_squad_service.apply_restore_fields(subscription)
+                logger.info(
+                    'expire-squad: сквады восстановлены при reset_traffic',
                     subscription_id=subscription.id,
                     reason=reset_reason,
                 )
