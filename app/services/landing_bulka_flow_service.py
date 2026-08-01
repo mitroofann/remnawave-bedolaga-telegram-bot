@@ -117,29 +117,113 @@ async def build_bulka_flow_config(db: AsyncSession, landing: LandingPage, user: 
             except GuestPurchaseError:
                 continue
             base = tariff.get_purchasable_price_for_period(days)
-            periods.append({'days': days, 'price_kopeks': price, 'original_price_kopeks': base if base != price else None, 'discount_percent': (round((1 - price / base) * 100) if base and base != price else None)})
+            periods.append(
+                {
+                    'days': days,
+                    'price_kopeks': price,
+                    'original_price_kopeks': base if base != price else None,
+                    'discount_percent': (round((1 - price / base) * 100) if base and base != price else None),
+                }
+            )
         if periods:
-            tariffs.append({'id': tariff.id, 'name': tariff.name, 'description_html': tariff.description, 'traffic_limit_gb': tariff.traffic_limit_gb, 'device_limit': tariff.device_limit, 'is_daily': bool(tariff.is_daily), 'periods': periods})
+            tariffs.append(
+                {
+                    'id': tariff.id,
+                    'name': tariff.name,
+                    'description_html': tariff.description,
+                    'traffic_limit_gb': tariff.traffic_limit_gb,
+                    'device_limit': tariff.device_limit,
+                    'is_daily': bool(tariff.is_daily),
+                    'periods': periods,
+                }
+            )
     methods = []
     defaults = _get_method_defaults()
     for method in landing.payment_methods or []:
         method_id = method.get('method_id', '')
-        known = (defaults.get(method_id, {}).get('available_sub_options') or [])
+        known = defaults.get(method_id, {}).get('available_sub_options') or []
         enabled = method.get('sub_options')
-        sub_options = [{'id': item['id'], 'name': item['name']} for item in known if enabled is None or enabled.get(item['id'], True)]
-        methods.append({key: method.get(key) for key in ('method_id', 'display_name', 'description', 'icon_url', 'sort_order', 'min_amount_kopeks', 'max_amount_kopeks', 'currency') } | {'sub_options': sub_options or None})
+        sub_options = [
+            {'id': item['id'], 'name': item['name']}
+            for item in known
+            if enabled is None or enabled.get(item['id'], True)
+        ]
+        methods.append(
+            {
+                key: method.get(key)
+                for key in (
+                    'method_id',
+                    'display_name',
+                    'description',
+                    'icon_url',
+                    'sort_order',
+                    'min_amount_kopeks',
+                    'max_amount_kopeks',
+                    'currency',
+                )
+            }
+            | {'sub_options': sub_options or None}
+        )
     methods.sort(key=lambda item: item['sort_order'] or 0)
-    return {'landing_slug': landing.slug, 'landing_template': _TEMPLATE, 'trial': {'available': trial_available, 'unavailable_code': unavailable_code, 'unavailable_reason': unavailable_reason, 'tariff_id': params.tariff_id, 'tariff_name': trial_tariff.name if trial_tariff else None, 'tariff_description_html': trial_tariff.description if trial_tariff else None, 'duration_days': params.duration_days, 'traffic_limit_gb': params.traffic_limit_gb, 'device_limit': params.device_limit, 'requires_external_payment': params.requires_payment, 'price_kopeks': params.price_kopeks, 'currency': 'RUB'}, 'tariffs': tariffs, 'payment_methods': methods}
+    return {
+        'landing_slug': landing.slug,
+        'landing_template': _TEMPLATE,
+        'trial': {
+            'available': trial_available,
+            'unavailable_code': unavailable_code,
+            'unavailable_reason': unavailable_reason,
+            'tariff_id': params.tariff_id,
+            'tariff_name': trial_tariff.name if trial_tariff else None,
+            'tariff_description_html': trial_tariff.description if trial_tariff else None,
+            'duration_days': params.duration_days,
+            'traffic_limit_gb': params.traffic_limit_gb,
+            'device_limit': params.device_limit,
+            'requires_external_payment': params.requires_payment,
+            'price_kopeks': params.price_kopeks,
+            'currency': 'RUB',
+        },
+        'tariffs': tariffs,
+        'payment_methods': methods,
+    }
 
 
-async def create_bulka_purchase(db: AsyncSession, *, landing: LandingPage, user: User, flow_kind: Literal['trial', 'purchase'], tariff_id: int | None, period_days: int | None, payment_method: str, payment_sub_option: str | None, idempotency_key: str, language: str | None, yandex_cid: str | None, referrer: str | None, subid: str | None) -> BulkaPurchaseResult:
+async def create_bulka_purchase(
+    db: AsyncSession,
+    *,
+    landing: LandingPage,
+    user: User,
+    flow_kind: Literal['trial', 'purchase'],
+    tariff_id: int | None,
+    period_days: int | None,
+    payment_method: str,
+    payment_sub_option: str | None,
+    idempotency_key: str,
+    language: str | None,
+    yandex_cid: str | None,
+    referrer: str | None,
+    subid: str | None,
+) -> BulkaPurchaseResult:
     _assert_bulka_landing(landing)
-    request_payload = {'flow_kind': flow_kind, 'tariff_id': tariff_id, 'period_days': period_days, 'payment_method': payment_method, 'payment_sub_option': payment_sub_option, 'language': language, 'yandex_cid': yandex_cid, 'referrer': referrer, 'subid': subid}
+    request_payload = {
+        'flow_kind': flow_kind,
+        'tariff_id': tariff_id,
+        'period_days': period_days,
+        'payment_method': payment_method,
+        'payment_sub_option': payment_sub_option,
+        'language': language,
+        'yandex_cid': yandex_cid,
+        'referrer': referrer,
+        'subid': subid,
+    }
     fingerprint = _payload_hash(request_payload)
-    existing = await get_bulka_purchase_by_idempotency_key(db, user_id=user.id, landing_id=landing.id, idempotency_key=idempotency_key, lock=True)
+    existing = await get_bulka_purchase_by_idempotency_key(
+        db, user_id=user.id, landing_id=landing.id, idempotency_key=idempotency_key, lock=True
+    )
     if existing:
         if existing.idempotency_payload_hash != fingerprint:
-            raise _error('idempotency_payload_mismatch', 'Idempotency-Key was already used with a different request', 409)
+            raise _error(
+                'idempotency_payload_mismatch', 'Idempotency-Key was already used with a different request', 409
+            )
         if not existing.payment_url:
             raise _error('purchase_initializing', 'Purchase is still being initialized', 409)
         return BulkaPurchaseResult(existing, existing.payment_url)
@@ -165,17 +249,50 @@ async def create_bulka_purchase(db: AsyncSession, *, landing: LandingPage, user:
         raise _error('payment_amount_too_low', 'Amount is below the payment method minimum')
     if method_config.get('max_amount_kopeks') is not None and amount > method_config['max_amount_kopeks']:
         raise _error('payment_amount_too_high', 'Amount exceeds the payment method maximum')
-    purchase = await create_guest_purchase(db, commit=False, landing_id=landing.id, landing_slug=landing.slug, landing_template=_TEMPLATE, flow_kind=flow_kind, selected_tariff_id=tariff.id, selected_period_days=selected_period, idempotency_key=idempotency_key, idempotency_payload_hash=fingerprint, flow_return_kind='bulka_connect', tariff_id=tariff.id, period_days=selected_period, amount_kopeks=amount, contact_type=contact_type, contact_value=contact_value, payment_method=provider_method, source='landing', buyer_user_id=user.id, user_id=user.id, status=GuestPurchaseStatus.PENDING.value, subid=subid, referrer=referrer)
+    purchase = await create_guest_purchase(
+        db,
+        commit=False,
+        landing_id=landing.id,
+        landing_slug=landing.slug,
+        landing_template=_TEMPLATE,
+        flow_kind=flow_kind,
+        selected_tariff_id=tariff.id,
+        selected_period_days=selected_period,
+        idempotency_key=idempotency_key,
+        idempotency_payload_hash=fingerprint,
+        flow_return_kind='bulka_connect',
+        tariff_id=tariff.id,
+        period_days=selected_period,
+        amount_kopeks=amount,
+        contact_type=contact_type,
+        contact_value=contact_value,
+        payment_method=provider_method,
+        source='landing',
+        buyer_user_id=user.id,
+        user_id=user.id,
+        status=GuestPurchaseStatus.PENDING.value,
+        subid=subid,
+        referrer=referrer,
+    )
     try:
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        existing = await get_bulka_purchase_by_idempotency_key(db, user_id=user.id, landing_id=landing.id, idempotency_key=idempotency_key)
+        existing = await get_bulka_purchase_by_idempotency_key(
+            db, user_id=user.id, landing_id=landing.id, idempotency_key=idempotency_key
+        )
         if existing and existing.idempotency_payload_hash == fingerprint and existing.payment_url:
             return BulkaPurchaseResult(existing, existing.payment_url)
         raise _error('purchase_initializing', 'Purchase is being initialized', 409)
-    return_url = f"{(settings.CABINET_URL or '').rstrip('/')}/buy/success/{purchase.token}"
-    result = await PaymentService().create_guest_payment(db=db, amount_kopeks=amount, payment_method=provider_method, description=f'{tariff.name} — {selected_period}d', purchase_token=purchase.token, return_url=return_url)
+    return_url = f'{(settings.CABINET_URL or "").rstrip("/")}/buy/success/{purchase.token}'
+    result = await PaymentService().create_guest_payment(
+        db=db,
+        amount_kopeks=amount,
+        payment_method=provider_method,
+        description=f'{tariff.name} — {selected_period}d',
+        purchase_token=purchase.token,
+        return_url=return_url,
+    )
     payment_url = result.get('payment_url') if result else None
     if not payment_url:
         await db.rollback()
@@ -207,15 +324,41 @@ async def fulfill_bulka_purchase(db: AsyncSession, purchase: GuestPurchase) -> G
                 await db.commit()
                 return purchase
             params = await resolve_landing_trial_params(db)
-            subscription = await create_trial_subscription(db=db, user_id=user.id, duration_days=purchase.selected_period_days or params.duration_days, traffic_limit_gb=params.traffic_limit_gb, device_limit=params.device_limit, connected_squads=params.squads or None, tariff_id=purchase.selected_tariff_id)
+            subscription = await create_trial_subscription(
+                db=db,
+                user_id=user.id,
+                duration_days=purchase.selected_period_days or params.duration_days,
+                traffic_limit_gb=params.traffic_limit_gb,
+                device_limit=params.device_limit,
+                connected_squads=params.squads or None,
+                tariff_id=purchase.selected_tariff_id,
+            )
         else:
             existing = await get_subscription_by_user_id(db, user.id)
             squads = list(tariff.allowed_squads or [])
             if existing is not None:
                 existing.tariff_id = tariff.id
-                subscription = await replace_subscription(db, existing, duration_days=purchase.selected_period_days or purchase.period_days, traffic_limit_gb=tariff.traffic_limit_gb, device_limit=tariff.device_limit, connected_squads=squads, is_trial=False, update_server_counters=True)
+                subscription = await replace_subscription(
+                    db,
+                    existing,
+                    duration_days=purchase.selected_period_days or purchase.period_days,
+                    traffic_limit_gb=tariff.traffic_limit_gb,
+                    device_limit=tariff.device_limit,
+                    connected_squads=squads,
+                    is_trial=False,
+                    update_server_counters=True,
+                )
             else:
-                subscription = await create_paid_subscription(db=db, user_id=user.id, duration_days=purchase.selected_period_days or purchase.period_days, traffic_limit_gb=tariff.traffic_limit_gb, device_limit=tariff.device_limit, connected_squads=squads, tariff_id=tariff.id, update_server_counters=True)
+                subscription = await create_paid_subscription(
+                    db=db,
+                    user_id=user.id,
+                    duration_days=purchase.selected_period_days or purchase.period_days,
+                    traffic_limit_gb=tariff.traffic_limit_gb,
+                    device_limit=tariff.device_limit,
+                    connected_squads=squads,
+                    tariff_id=tariff.id,
+                    update_server_counters=True,
+                )
         await SubscriptionService().create_remnawave_user(db, subscription)
         await db.refresh(subscription)
         purchase.subscription_id = subscription.id

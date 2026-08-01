@@ -84,7 +84,9 @@ async def create_bulka_flow_purchase(
     """Create exactly one provider payment per user/landing/idempotency key."""
     client_ip = get_client_ip(raw_request)
     if await RateLimitCache.is_ip_rate_limited(client_ip, 'bulka_flow_purchase', limit=30, window=60, fail_closed=True):
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail='Too many purchase attempts, please try again later')
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail='Too many purchase attempts, please try again later'
+        )
     try:
         landing = await get_active_landing_by_slug(db, slug)
         result = await create_bulka_purchase(
