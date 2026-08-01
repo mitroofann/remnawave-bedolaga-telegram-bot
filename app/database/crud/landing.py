@@ -82,6 +82,7 @@ _LANDING_UPDATABLE_FIELDS = frozenset(
         'analytics_click_enabled',
         'analytics_click_goal',
         'trial_enabled',
+        'template',
     }
 )
 
@@ -160,6 +161,26 @@ async def create_guest_purchase(db: AsyncSession, *, commit: bool = True, **kwar
 async def get_purchase_by_token(db: AsyncSession, token: str) -> GuestPurchase | None:
     """Get a guest purchase by its token."""
     result = await db.execute(select(GuestPurchase).where(GuestPurchase.token == token))
+    return result.scalars().first()
+
+
+async def get_bulka_purchase_by_idempotency_key(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    landing_id: int,
+    idempotency_key: str,
+    lock: bool = False,
+) -> GuestPurchase | None:
+    """Return the persisted Bulka purchase for an authenticated retry."""
+    statement = select(GuestPurchase).where(
+        GuestPurchase.user_id == user_id,
+        GuestPurchase.landing_id == landing_id,
+        GuestPurchase.idempotency_key == idempotency_key,
+    )
+    if lock:
+        statement = statement.with_for_update()
+    result = await db.execute(statement)
     return result.scalars().first()
 
 

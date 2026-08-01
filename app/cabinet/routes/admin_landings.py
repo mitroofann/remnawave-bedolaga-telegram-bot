@@ -2,6 +2,7 @@
 
 from collections import Counter
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 from urllib.parse import urlparse
 
 import structlog
@@ -54,6 +55,7 @@ _RESERVED_SLUGS = frozenset(
 
 
 _ALLOWED_BG_CONFIG_KEYS = frozenset({'enabled', 'type', 'settings', 'opacity', 'blur', 'reducedOnMobile'})
+LandingTemplate = Literal['classic', 'bulka_sales_flow']
 
 
 def _validate_background_config(v: dict | None) -> dict | None:
@@ -182,6 +184,7 @@ class LandingCreateRequest(BaseModel):
     title: dict[str, str] = Field(default_factory=lambda: {'ru': ''})
     subtitle: dict[str, str] | None = None
     is_active: bool = True
+    template: LandingTemplate = 'classic'
     features: list[LandingFeatureInput] = Field(default_factory=list, max_length=20)
     footer_text: dict[str, str] | None = None
     allowed_tariff_ids: list[int] = Field(default_factory=list, max_length=50)
@@ -317,6 +320,7 @@ class LandingUpdateRequest(BaseModel):
     title: dict[str, str] | None = None
     subtitle: dict[str, str] | None = None
     is_active: bool | None = None
+    template: LandingTemplate | None = None
     features: list[LandingFeatureInput] | None = Field(default=None, max_length=20)
     footer_text: dict[str, str] | None = None
     allowed_tariff_ids: list[int] | None = Field(default=None, max_length=50)
@@ -445,6 +449,7 @@ class LandingListItem(BaseModel):
     slug: str
     title: dict[str, str]
     is_active: bool
+    template: LandingTemplate = 'classic'
     display_order: int
     gift_enabled: bool
     tariff_count: int
@@ -469,6 +474,7 @@ class LandingDetailResponse(BaseModel):
     title: dict[str, str]
     subtitle: dict[str, str] | None = None
     is_active: bool
+    template: LandingTemplate = 'classic'
     display_order: int
     features: list[LandingFeatureInput]
     footer_text: dict[str, str] | None = None
@@ -621,6 +627,7 @@ async def list_landings(
                 slug=landing.slug,
                 title=landing.title,
                 is_active=landing.is_active,
+                template=landing.template,
                 display_order=landing.display_order,
                 gift_enabled=landing.gift_enabled,
                 tariff_count=len(landing.allowed_tariff_ids or []),
@@ -668,6 +675,7 @@ async def create_landing_page(
         title=request.title,
         subtitle=request.subtitle,
         is_active=request.is_active,
+        template=request.template,
         features=[f.model_dump() for f in request.features],
         footer_text=request.footer_text,
         allowed_tariff_ids=request.allowed_tariff_ids,
@@ -1158,6 +1166,7 @@ def _landing_to_detail(landing: LandingPage) -> LandingDetailResponse:
         title=landing.title or {},
         subtitle=landing.subtitle,
         is_active=landing.is_active,
+        template=landing.template,
         display_order=landing.display_order,
         features=features,
         footer_text=landing.footer_text,

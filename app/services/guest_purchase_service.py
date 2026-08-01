@@ -345,6 +345,13 @@ async def fulfill_purchase(
         )
         return purchase
 
+    # Isolated authenticated Bulka flow. Its stored context is authoritative:
+    # the landing template may have changed since the provider payment began.
+    if purchase.landing_template == 'bulka_sales_flow':
+        from app.services.landing_bulka_flow_service import fulfill_bulka_purchase
+
+        return await fulfill_bulka_purchase(db, purchase)
+
     try:
         # Determine recipient contact info
         recipient_type, recipient_value = _get_recipient_contact(purchase)

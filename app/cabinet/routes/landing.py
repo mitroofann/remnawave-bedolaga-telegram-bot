@@ -93,6 +93,7 @@ class LandingDiscountInfo(BaseModel):
 
 class LandingConfigResponse(BaseModel):
     slug: str
+    template: str = 'classic'
     title: str
     subtitle: str | None = None
     features: list[LandingFeature]
@@ -178,6 +179,12 @@ class PurchaseStatusResponse(BaseModel):
     is_claimable: bool = False
     claim_url: str | None = None
     bot_claim_link: str | None = None
+    # Additive authenticated Bulka flow context. Classic token responses leave these null.
+    landing_template: str | None = None
+    flow_kind: str | None = None
+    flow_return_kind: str | None = None
+    activated_at: datetime | None = None
+    subscription_id: int | None = None
 
 
 class GiftClaimRequest(BaseModel):
@@ -319,6 +326,11 @@ def _build_purchase_status_response(purchase: GuestPurchase) -> PurchaseStatusRe
         is_claimable=is_claimable,
         claim_url=claim_url,
         bot_claim_link=bot_claim_link,
+        landing_template=purchase.landing_template,
+        flow_kind=purchase.flow_kind,
+        flow_return_kind=purchase.flow_return_kind,
+        activated_at=purchase.activated_at,
+        subscription_id=purchase.subscription_id,
     )
 
 
@@ -695,6 +707,7 @@ async def get_landing_config(
 
     return LandingConfigResponse(
         slug=landing.slug,
+        template=landing.template,
         title=resolve_locale_text(landing.title, lang),
         subtitle=resolve_locale_text(landing.subtitle, lang) or None,
         features=features,

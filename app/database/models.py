@@ -4437,11 +4437,17 @@ class LandingPage(Base):
             'discount_starts_at IS NULL OR discount_ends_at IS NULL OR discount_starts_at < discount_ends_at',
             name='chk_landing_discount_dates_order',
         ),
+        CheckConstraint(
+            "template IN ('classic', 'bulka_sales_flow')",
+            name='chk_landing_template',
+        ),
     )
 
     id = Column(Integer, primary_key=True, index=True)
     slug = Column(String(100), unique=True, nullable=False, index=True)
     is_active = Column(Boolean, nullable=False, default=True)
+    # Landing presentation/checkout contract. Existing rows stay classic.
+    template = Column(String(32), nullable=False, default='classic', server_default='classic')
     title = Column(JSON, nullable=False, default=dict)
     subtitle = Column(JSON, nullable=True)
     features = Column(JSON, nullable=False, default=list)
@@ -4502,11 +4508,39 @@ class GuestPurchase(Base):
         Index('ix_guest_purchases_user_gift_status', 'user_id', 'is_gift', 'status'),
         Index('ix_guest_purchases_status_paid_at', 'status', 'paid_at'),
         Index('ix_guest_purchases_buyer_user_id', 'buyer_user_id'),
+        Index(
+            'uq_guest_purchases_bulka_idempotency',
+            'user_id',
+            'landing_id',
+            'idempotency_key',
+            unique=True,
+            postgresql_where=text('idempotency_key IS NOT NULL'),
+        ),
+        CheckConstraint(
+            "landing_template IS NULL OR landing_template IN ('bulka_sales_flow')",
+            name='chk_guest_purchase_landing_template',
+        ),
+        CheckConstraint(
+            "flow_kind IS NULL OR flow_kind IN ('trial', 'purchase')",
+            name='chk_guest_purchase_flow_kind',
+        ),
     )
 
     id = Column(Integer, primary_key=True, index=True)
     token = Column(String(64), unique=True, nullable=False, index=True)
     landing_id = Column(Integer, ForeignKey('landing_pages.id', ondelete='SET NULL'), nullable=True)
+    # Immutable Bulka flow snapshot: never infer behavior from the mutable landing row at fulfillment.
+    landing_slug = Column(String(100), nullable=True)
+    landing_template = Column(String(32), nullable=True)
+    flow_kind = Column(String(20), nullable=True)  # 'trial' | 'purchase'
+    selected_tariff_id = Column(Integer, nullable=True)
+    selected_period_days = Column(Integer, nullable=True)
+    idempotency_key = Column(String(36), nullable=True)
+    idempotency_payload_hash = Column(String(64), nullable=True)
+    payment_url = Column(Text, nullable=True)
+    flow_return_kind = Column(String(50), nullable=True)
+    activated_at = Column(AwareDateTime(), nullable=True)
+    subscription_id = Column(Integer, ForeignKey('subscriptions.id', ondelete='SET NULL'), nullable=True)
     contact_type = Column(String(20), nullable=False)  # 'email' or 'telegram'
     contact_value = Column(String(255), nullable=False)
     is_gift = Column(Boolean, nullable=False, default=False)
@@ -4546,6 +4580,7 @@ class GuestPurchase(Base):
     tariff = relationship('Tariff', lazy='selectin')
     user = relationship('User', foreign_keys=[user_id], lazy='selectin')
     buyer = relationship('User', foreign_keys=[buyer_user_id], lazy='selectin')
+    subscription = relationship('Subscription', foreign_keys=[subscription_id], lazy='selectin')
 
     def __repr__(self) -> str:
         token_prefix = self.token[:5] if self.token else '?'
