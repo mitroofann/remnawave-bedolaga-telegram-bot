@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
+import structlog
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,13 +23,27 @@ from app.database.crud.subscription import (
     replace_subscription,
 )
 from app.database.crud.tariff import get_tariff_by_id
-from app.database.models import GuestPurchase, GuestPurchaseStatus, LandingPage, User
-from app.services.guest_purchase_service import GuestPurchaseError, validate_and_calculate
+from app.database.crud.transaction import create_transaction, emit_transaction_side_effects
+from app.database.models import (
+    GuestPurchase,
+    GuestPurchaseStatus,
+    LandingPage,
+    Transaction,
+    TransactionType,
+    User,
+)
+from app.services.guest_purchase_service import (
+    GuestPurchaseError,
+    _resolve_payment_method,
+    validate_and_calculate,
+)
 from app.services.landing_trial_service import is_landing_trial_globally_enabled, resolve_landing_trial_params
 from app.services.payment_method_config_service import _get_method_defaults
 from app.services.payment_service import PaymentService
 from app.services.subscription_service import SubscriptionService
 
+
+logger = structlog.get_logger(__name__)
 
 _TEMPLATE = 'bulka_sales_flow'
 _USERNAME_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9_]{4,31}$')
@@ -302,6 +318,117 @@ async def create_bulka_purchase(
     return BulkaPurchaseResult(purchase, payment_url)
 
 
+async def _bulka_transaction_exists(
+    db: AsyncSession, *, user_id: int, external_id: str, payment_method_value: str | None
+) -> bool:
+    """Whether a balance Transaction already links to this Bulka purchase.
+
+    The link is the same implicit pair the classic landing path uses:
+    ``Transaction.external_id == GuestPurchase.payment_id`` scoped by payment
+    method and the SUBSCRIPTION_PAYMENT type. Handler and backfill share this
+    exact predicate so they never double-write the same purchase.
+    """
+    query = (
+        select(Transaction.id)
+        .where(
+            Transaction.user_id == user_id,
+            Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
+            Transaction.external_id == external_id,
+        )
+        .limit(1)
+    )
+    if payment_method_value is not None:
+        query = query.where(Transaction.payment_method == payment_method_value)
+    result = await db.execute(query)
+    return result.scalar_one_or_none() is not None
+
+
+async def record_bulka_transaction(
+    db: AsyncSession,
+    purchase: GuestPurchase,
+    *,
+    tariff_name: str | None = None,
+    fire_side_effects: bool = True,
+    created_at: datetime | None = None,
+) -> Transaction | None:
+    """Create the balance Transaction for a delivered paid Bulka purchase (idempotent).
+
+    Mirrors the classic landing path in ``guest_purchase_service.fulfill_purchase``:
+    a SUBSCRIPTION_PAYMENT tied to the provider payment via ``external_id=payment_id``.
+    Reuses the developer's ``create_transaction`` / ``_resolve_payment_method`` rather
+    than reimplementing the logic. Returns the created row, or ``None`` when nothing
+    should be recorded (gift, free trial, missing user/payment id, or already present).
+
+    Args:
+        fire_side_effects: run the deferred side-effects (Yandex conversion, promo
+            group, contest) after commit. The handler wants them; the historical
+            backfill passes ``False`` so it never fires stale conversions.
+        created_at: override the transaction timestamp — the backfill passes the
+            purchase's ``paid_at`` so the journal shows the real payment date.
+    """
+    if purchase.is_gift or (purchase.amount_kopeks or 0) <= 0:
+        return None
+    if purchase.user_id is None or not purchase.payment_id:
+        return None
+
+    payment_method_enum = _resolve_payment_method(purchase.payment_method)
+    payment_method_value = payment_method_enum.value if payment_method_enum else None
+
+    if await _bulka_transaction_exists(
+        db,
+        user_id=purchase.user_id,
+        external_id=purchase.payment_id,
+        payment_method_value=payment_method_value,
+    ):
+        return None
+
+    if tariff_name is None:
+        tariff = await get_tariff_by_id(db, purchase.selected_tariff_id or purchase.tariff_id)
+        tariff_name = tariff.name if tariff else 'Bulka'
+    period_days = purchase.selected_period_days or purchase.period_days
+
+    # commit=False keeps the write inside the caller's transaction; the unique
+    # constraint uq_transaction_external_id_method is the last line of defence
+    # against a racing webhook that slipped past the existence check above.
+    try:
+        transaction = await create_transaction(
+            db=db,
+            user_id=purchase.user_id,
+            type=TransactionType.SUBSCRIPTION_PAYMENT,
+            amount_kopeks=purchase.amount_kopeks,
+            description=f'Покупка подписки через лендинг ({tariff_name}, {period_days} дн.)',
+            payment_method=payment_method_enum,
+            external_id=purchase.payment_id,
+            is_completed=True,
+            created_at=created_at,
+            commit=False,
+        )
+        await db.commit()
+    except IntegrityError:
+        # Racing webhook already inserted the same (external_id, payment_method):
+        # idempotent no-op, don't poison the session.
+        await db.rollback()
+        return None
+
+    if fire_side_effects:
+        try:
+            await emit_transaction_side_effects(
+                db,
+                transaction,
+                amount_kopeks=purchase.amount_kopeks,
+                user_id=purchase.user_id,
+                type=TransactionType.SUBSCRIPTION_PAYMENT,
+                payment_method=payment_method_enum,
+                external_id=purchase.payment_id,
+                is_completed=True,
+                description=transaction.description or '',
+            )
+        except Exception:
+            logger.warning('Bulka: failed to emit transaction side-effects', purchase_id=purchase.id)
+
+    return transaction
+
+
 async def fulfill_bulka_purchase(db: AsyncSession, purchase: GuestPurchase) -> GuestPurchase:
     """Fulfill a paid Bulka purchase; caller already owns the purchase row lock."""
     if purchase.activated_at or purchase.status != GuestPurchaseStatus.PAID.value:
@@ -373,4 +500,19 @@ async def fulfill_bulka_purchase(db: AsyncSession, purchase: GuestPurchase) -> G
         await db.rollback()
         purchase.status = GuestPurchaseStatus.PENDING_ACTIVATION.value
         await db.commit()
+        return purchase
+
+    # Delivery is committed above. Record the accounting Transaction so the paid
+    # Bulka purchase shows up in the user's cabinet payment journal, exactly like
+    # the classic landing path. Isolated from delivery: a failure here must not
+    # roll back the already-delivered subscription, so it runs after the commit
+    # with its own guard.
+    try:
+        await record_bulka_transaction(db, purchase, tariff_name=tariff.name)
+    except Exception:
+        logger.exception('Bulka: failed to record purchase transaction', purchase_id=purchase.id)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
     return purchase
