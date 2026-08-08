@@ -19,7 +19,7 @@ def _make_subscription(**kwargs):
     defaults = dict(
         id=1,
         user_id=42,
-        remnawave_uuid='sub-uuid',
+        remnawave_id=12345,
         connected_squads=['sq-eu', 'sq-lte'],
         expire_disabled_squads=[],
         expire_free_until=None,
@@ -139,13 +139,13 @@ def test_apply_restore_fields_noop_when_nothing_disabled():
 @pytest.mark.anyio
 async def test_handle_expiration_branch_a_clears_all(monkeypatch):
     monkeypatch.setattr(svc, 'is_enabled', lambda: True)
-    monkeypatch.setattr(svc, '_resolve_panel_uuid', lambda sub, user: 'sub-uuid')
+    monkeypatch.setattr(svc, '_resolve_panel_user_id', lambda sub, user: 12345)
     push = AsyncMock(return_value=True)
     monkeypatch.setattr(svc, '_push_to_panel', push)
 
     # Тариф без free-сквадов → ветка A.
     sub = _make_subscription()
-    handled = await svc.handle_expiration(_fake_db(), SimpleNamespace(remnawave_uuid='sub-uuid'), sub)
+    handled = await svc.handle_expiration(_fake_db(), SimpleNamespace(remnawave_id=12345), sub)
 
     assert handled is True
     assert sub.connected_squads == []
@@ -160,7 +160,7 @@ async def test_handle_expiration_branch_a_clears_all(monkeypatch):
 @pytest.mark.anyio
 async def test_handle_expiration_branch_b_gives_free_squad(monkeypatch):
     monkeypatch.setattr(svc, 'is_enabled', lambda: True)
-    monkeypatch.setattr(svc, '_resolve_panel_uuid', lambda sub, user: 'sub-uuid')
+    monkeypatch.setattr(svc, '_resolve_panel_user_id', lambda sub, user: 12345)
     push = AsyncMock(return_value=True)
     monkeypatch.setattr(svc, '_push_to_panel', push)
 
@@ -168,7 +168,7 @@ async def test_handle_expiration_branch_b_gives_free_squad(monkeypatch):
     sub = _make_subscription(tariff=SimpleNamespace(expire_free_squads=['sq-free'], expire_free_days=7))
     with patch('app.services.expire_squad_service.datetime') as mock_dt:
         mock_dt.now.return_value = now
-        handled = await svc.handle_expiration(_fake_db(), SimpleNamespace(remnawave_uuid='sub-uuid'), sub)
+        handled = await svc.handle_expiration(_fake_db(), SimpleNamespace(remnawave_id=12345), sub)
 
     assert handled is True
     # Реальные сквады отложены, выданы free-сквады, статус ACTIVE.
@@ -192,7 +192,7 @@ async def test_handle_expiration_disabled_by_flag(monkeypatch):
 @pytest.mark.anyio
 async def test_handle_expiration_nothing_to_do(monkeypatch):
     monkeypatch.setattr(svc, 'is_enabled', lambda: True)
-    monkeypatch.setattr(svc, '_resolve_panel_uuid', lambda sub, user: 'sub-uuid')
+    monkeypatch.setattr(svc, '_resolve_panel_user_id', lambda sub, user: 12345)
     # Сквадов нет и free-сквадов нет → нечего делать.
     sub = _make_subscription(connected_squads=[])
     handled = await svc.handle_expiration(_fake_db(), SimpleNamespace(), sub)
@@ -202,13 +202,13 @@ async def test_handle_expiration_nothing_to_do(monkeypatch):
 @pytest.mark.anyio
 async def test_handle_expiration_idempotent_repush_branch_a(monkeypatch):
     monkeypatch.setattr(svc, 'is_enabled', lambda: True)
-    monkeypatch.setattr(svc, '_resolve_panel_uuid', lambda sub, user: 'sub-uuid')
+    monkeypatch.setattr(svc, '_resolve_panel_user_id', lambda sub, user: 12345)
     push = AsyncMock(return_value=True)
     monkeypatch.setattr(svc, '_push_to_panel', push)
 
     # Уже обработана веткой A (сквады отложены, free-окна нет) — повторный вызов ре-пушит [].
     sub = _make_subscription(connected_squads=[], expire_disabled_squads=['sq-eu'], expire_free_until=None)
-    handled = await svc.handle_expiration(_fake_db(), SimpleNamespace(remnawave_uuid='sub-uuid'), sub)
+    handled = await svc.handle_expiration(_fake_db(), SimpleNamespace(remnawave_id=12345), sub)
     assert handled is True
     push.assert_awaited_once()
     assert push.await_args.kwargs['active_squads'] == []
@@ -217,7 +217,7 @@ async def test_handle_expiration_idempotent_repush_branch_a(monkeypatch):
 @pytest.mark.anyio
 async def test_handle_expiration_idempotent_repush_branch_b(monkeypatch):
     monkeypatch.setattr(svc, 'is_enabled', lambda: True)
-    monkeypatch.setattr(svc, '_resolve_panel_uuid', lambda sub, user: 'sub-uuid')
+    monkeypatch.setattr(svc, '_resolve_panel_user_id', lambda sub, user: 12345)
     push = AsyncMock(return_value=True)
     monkeypatch.setattr(svc, '_push_to_panel', push)
 
@@ -230,7 +230,7 @@ async def test_handle_expiration_idempotent_repush_branch_b(monkeypatch):
     )
     with patch('app.services.expire_squad_service.datetime') as mock_dt:
         mock_dt.now.return_value = now
-        handled = await svc.handle_expiration(_fake_db(), SimpleNamespace(remnawave_uuid='sub-uuid'), sub)
+        handled = await svc.handle_expiration(_fake_db(), SimpleNamespace(remnawave_id=12345), sub)
     assert handled is True
     push.assert_awaited_once()
     assert push.await_args.kwargs['active_squads'] == ['sq-free']
@@ -243,7 +243,7 @@ async def test_handle_expiration_idempotent_repush_branch_b(monkeypatch):
 async def test_finalize_expired_clears_free_squad(monkeypatch):
     push = AsyncMock(return_value=True)
     monkeypatch.setattr(svc, '_push_to_panel', push)
-    monkeypatch.setattr(svc, '_resolve_panel_uuid', lambda sub, user: 'sub-uuid')
+    monkeypatch.setattr(svc, '_resolve_panel_user_id', lambda sub, user: 12345)
 
     sub = _make_subscription(
         connected_squads=['sq-free'],
@@ -251,7 +251,7 @@ async def test_finalize_expired_clears_free_squad(monkeypatch):
         expire_free_until=datetime(2026, 7, 10, tzinfo=UTC),
     )
     with patch(
-        'app.database.crud.user.get_user_by_id', AsyncMock(return_value=SimpleNamespace(remnawave_uuid='sub-uuid'))
+        'app.database.crud.user.get_user_by_id', AsyncMock(return_value=SimpleNamespace(remnawave_id=12345))
     ):
         done = await svc.finalize_expired(_fake_db(), sub)
 
@@ -286,10 +286,10 @@ async def test_restore_squads_pushes_and_clears(monkeypatch):
 
     push = AsyncMock(return_value=True)
     monkeypatch.setattr(svc, '_push_restore_to_panel', push)
-    monkeypatch.setattr(svc, '_resolve_panel_uuid', lambda sub, user: 'sub-uuid')
+    monkeypatch.setattr(svc, '_resolve_panel_user_id', lambda sub, user: 12345)
 
     with patch(
-        'app.database.crud.user.get_user_by_id', AsyncMock(return_value=SimpleNamespace(remnawave_uuid='sub-uuid'))
+        'app.database.crud.user.get_user_by_id', AsyncMock(return_value=SimpleNamespace(remnawave_id=12345))
     ):
         restored = await svc.restore_squads(db, sub, reason='test')
 
@@ -323,7 +323,7 @@ async def _run_push(status, expire_at):
     with patch('app.services.subscription_service.SubscriptionService', return_value=service):
         ok = await svc._push_to_panel(
             _make_subscription(),
-            'panel-uuid',
+            12345,
             active_squads=[],
             expire_at=expire_at,
             status=status,

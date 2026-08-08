@@ -17,14 +17,14 @@ InFailedSQLTransactionError по всем задачам цикла).
 Апстримовые файлы 0101/0102/0103 НЕ трогаем — меньше конфликтов при будущих мержах.
 
 Revision ID: 0105
-Revises: 0104
+Revises: 0104_landing_trial
 """
 
 import sqlalchemy as sa
 from alembic import op
 
 revision = '0105'
-down_revision = '0104'
+down_revision = '0104_landing_trial'
 branch_labels = None
 depends_on = None
 

@@ -21,7 +21,7 @@ def _make_subscription(**kwargs):
     defaults = dict(
         id=1,
         user_id=42,
-        remnawave_uuid='sub-uuid',
+        remnawave_id=12345,
         connected_squads=['sq-eu', 'sq-lte'],
         traffic_limit_gb=50,
         traffic_limit_disabled_squads=[],
@@ -202,12 +202,12 @@ def test_should_disable_false_when_tariff_not_configured(monkeypatch):
 async def test_disable_squads_moves_squad_and_sets_unlimited(monkeypatch):
     monkeypatch.setattr(svc, 'is_enabled', lambda: True)
     sub = _make_subscription()
-    user = SimpleNamespace(remnawave_uuid='sub-uuid')
+    user = SimpleNamespace(remnawave_id=12345)
     db = _fake_db()
 
     push = AsyncMock(return_value=True)
     monkeypatch.setattr(svc, '_push_to_panel', push)
-    monkeypatch.setattr(svc, '_resolve_panel_uuid', lambda sub, user: 'sub-uuid')
+    monkeypatch.setattr(svc, '_resolve_panel_user_id', lambda sub, user: 12345)
 
     handled = await svc.disable_squads_on_limit(db, user, sub)
 
@@ -244,7 +244,7 @@ async def test_disable_squads_repushes_unlimited_when_already_disabled(monkeypat
     monkeypatch.setattr(svc, 'is_enabled', lambda: True)
     push = AsyncMock(return_value=True)
     monkeypatch.setattr(svc, '_push_to_panel', push)
-    monkeypatch.setattr(svc, '_resolve_panel_uuid', lambda sub, user: 'sub-uuid')
+    monkeypatch.setattr(svc, '_resolve_panel_user_id', lambda sub, user: 12345)
     # Застрявшая подписка: сквады погашены, но на панели ещё старый ненулевой лимит,
     # панель шлёт LIMITED повторно.
     sub = _make_subscription(
@@ -264,7 +264,7 @@ async def test_disable_squads_repush_when_already_unlimited(monkeypatch):
     monkeypatch.setattr(svc, 'is_enabled', lambda: True)
     push = AsyncMock(return_value=True)
     monkeypatch.setattr(svc, '_push_to_panel', push)
-    monkeypatch.setattr(svc, '_resolve_panel_uuid', lambda sub, user: 'sub-uuid')
+    monkeypatch.setattr(svc, '_resolve_panel_user_id', lambda sub, user: 12345)
     # Повторный вебхук на уже корректно погашенной подписке (лимит уже 0).
     sub = _make_subscription(
         connected_squads=['sq-eu'],
@@ -290,13 +290,13 @@ async def test_restore_squads_pushes_and_clears(monkeypatch):
     fake_service.update_remnawave_user = AsyncMock(return_value=object())
     fake_service.enable_remnawave_user = AsyncMock(return_value=True)
 
-    monkeypatch.setattr(svc, '_resolve_panel_uuid', lambda sub, user: 'sub-uuid')
+    monkeypatch.setattr(svc, '_resolve_panel_user_id', lambda sub, user: 12345)
 
     with (
         patch('app.services.subscription_service.SubscriptionService', return_value=fake_service),
         patch(
             'app.database.crud.user.get_user_by_id',
-            AsyncMock(return_value=SimpleNamespace(remnawave_uuid='sub-uuid')),
+            AsyncMock(return_value=SimpleNamespace(remnawave_id=12345)),
         ),
     ):
         restored = await svc.restore_squads(db, sub, reason='test')

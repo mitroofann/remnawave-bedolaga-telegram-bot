@@ -85,11 +85,12 @@ def squads_to_disable(subscription: Subscription) -> list[str]:
     return [uuid for uuid in connected if uuid in limit_squads]
 
 
-def _resolve_panel_uuid(subscription: Subscription, user) -> str | None:
-    """UUID пользователя в панели: подписочный в multi-tariff, иначе юзерский."""
+def _resolve_panel_user_id(subscription: Subscription, user) -> int | None:
+    """Числовой id пользователя в панели (Remnawave 3.0.0): подписочный в multi-tariff,
+    иначе юзерский. UUID больше не адресует пользователя — панель ждёт число."""
     if settings.is_multi_tariff_enabled():
-        return subscription.remnawave_uuid
-    return getattr(user, 'remnawave_uuid', None)
+        return subscription.remnawave_id
+    return getattr(user, 'remnawave_id', None)
 
 
 async def disable_squads_on_limit(
@@ -117,7 +118,7 @@ async def disable_squads_on_limit(
     if not is_enabled():
         return False
 
-    panel_uuid = _resolve_panel_uuid(subscription, user)
+    panel_user_id = _resolve_panel_user_id(subscription, user)
 
     # Идемпотентность + восстановление: если сквады уже погашены, но панель всё ещё шлёт
     # LIMITED (повторный вебхук каждые ~15с, либо застрявшая подписка со старым ненулевым
@@ -130,17 +131,17 @@ async def disable_squads_on_limit(
             subscription.traffic_limit_panel_bytes = 0
             await db.commit()
             await db.refresh(subscription)
-        if panel_uuid:
-            await _push_to_panel(db, subscription, panel_uuid, enable=True)
+        if panel_user_id:
+            await _push_to_panel(db, subscription, panel_user_id, enable=True)
         return True
 
     target = squads_to_disable(subscription)
     if not target:
         return False
 
-    if not panel_uuid:
+    if not panel_user_id:
         logger.warning(
-            'traffic-limit-squad: нет panel uuid, гашение пропущено',
+            'traffic-limit-squad: нет panel id, гашение пропущено',
             subscription_id=subscription.id,
             user_id=subscription.user_id,
         )
@@ -156,7 +157,7 @@ async def disable_squads_on_limit(
     await db.commit()
     await db.refresh(subscription)
 
-    ok = await _push_to_panel(db, subscription, panel_uuid, enable=True)
+    ok = await _push_to_panel(db, subscription, panel_user_id, enable=True)
     if not ok:
         logger.error(
             'traffic-limit-squad: не удалось применить гашение на панели',
@@ -218,10 +219,10 @@ async def restore_squads(db: AsyncSession, subscription: Subscription, *, reason
     from app.database.crud.user import get_user_by_id
 
     user = await get_user_by_id(db, subscription.user_id)
-    panel_uuid = _resolve_panel_uuid(subscription, user) if user else None
+    panel_user_id = _resolve_panel_user_id(subscription, user) if user else None
     ok = False
-    if panel_uuid:
-        ok = await _push_to_panel(db, subscription, panel_uuid, enable=True)
+    if panel_user_id:
+        ok = await _push_to_panel(db, subscription, panel_user_id, enable=True)
 
     logger.info(
         'traffic-limit-squad: сквады восстановлены',
@@ -324,7 +325,7 @@ def days_until_traffic_reset(subscription: Subscription, *, now: datetime | None
     return max((nxt.date() - now.date()).days, 0)
 
 
-async def _push_to_panel(db: AsyncSession, subscription: Subscription, panel_uuid: str, *, enable: bool) -> bool:
+async def _push_to_panel(db: AsyncSession, subscription: Subscription, panel_user_id: int, *, enable: bool) -> bool:
     """Синхронизировать сквады + лимит подписки с панелью и (опц.) снять LIMITED.
 
     Переиспользует ``SubscriptionService.update_remnawave_user`` (grace-safe,
@@ -342,8 +343,8 @@ async def _push_to_panel(db: AsyncSession, subscription: Subscription, panel_uui
             reset_traffic=False,
             sync_squads=True,
         )
-        if enable and panel_uuid:
-            await service.enable_remnawave_user(panel_uuid, db=db)
+        if enable and panel_user_id:
+            await service.enable_remnawave_user(panel_user_id, db=db)
         return updated is not None
     except Exception as error:
         logger.error('traffic-limit-squad: ошибка синхронизации с панелью', error=str(error))

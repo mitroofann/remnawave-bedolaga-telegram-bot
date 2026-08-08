@@ -95,11 +95,12 @@ def resolve_free_squads(subscription: Subscription) -> list[str]:
     return _tariff_free_squads(subscription)
 
 
-def _resolve_panel_uuid(subscription: Subscription, user) -> str | None:
-    """UUID пользователя в панели: подписочный в multi-tariff, иначе юзерский."""
+def _resolve_panel_user_id(subscription: Subscription, user) -> int | None:
+    """Числовой id пользователя в панели (Remnawave 3.0.0): подписочный в multi-tariff,
+    иначе юзерский. UUID больше не адресует пользователя — панель ждёт число."""
     if settings.is_multi_tariff_enabled():
-        return subscription.remnawave_uuid
-    return getattr(user, 'remnawave_uuid', None)
+        return subscription.remnawave_id
+    return getattr(user, 'remnawave_id', None)
 
 
 def should_handle_on_expiry(subscription: Subscription) -> bool:
@@ -126,17 +127,17 @@ async def handle_expiration(db: AsyncSession, user, subscription: Subscription) 
     if not is_enabled():
         return False
 
-    panel_uuid = _resolve_panel_uuid(subscription, user)
+    panel_user_id = _resolve_panel_user_id(subscription, user)
     now = datetime.now(UTC)
     free_squads = resolve_free_squads(subscription)
 
     # Идемпотентность: фича уже активна для подписки — просто перепушиваем текущее состояние.
     if has_expire_disabled_squads(subscription):
-        if panel_uuid:
+        if panel_user_id:
             if is_free_window_active(subscription, now=now):
                 await _push_to_panel(
                     subscription,
-                    panel_uuid,
+                    panel_user_id,
                     active_squads=subscription.connected_squads or [],
                     expire_at=_aware(subscription.expire_free_until),
                     status=SubscriptionStatus.ACTIVE,
@@ -144,7 +145,7 @@ async def handle_expiration(db: AsyncSession, user, subscription: Subscription) 
             else:
                 await _push_to_panel(
                     subscription,
-                    panel_uuid,
+                    panel_user_id,
                     active_squads=[],
                     expire_at=_aware(subscription.end_date),
                     status=SubscriptionStatus.EXPIRED,
@@ -156,9 +157,9 @@ async def handle_expiration(db: AsyncSession, user, subscription: Subscription) 
         # Сквадов нет и выдавать нечего — фича не применима, пусть штатный путь отработает.
         return False
 
-    if not panel_uuid:
+    if not panel_user_id:
         logger.warning(
-            'expire-squad: нет panel uuid, обработка пропущена',
+            'expire-squad: нет panel id, обработка пропущена',
             subscription_id=subscription.id,
             user_id=subscription.user_id,
         )
@@ -178,7 +179,7 @@ async def handle_expiration(db: AsyncSession, user, subscription: Subscription) 
 
         ok = await _push_to_panel(
             subscription,
-            panel_uuid,
+            panel_user_id,
             active_squads=list(free_squads),
             expire_at=panel_until,
             status=SubscriptionStatus.ACTIVE,
@@ -202,7 +203,7 @@ async def handle_expiration(db: AsyncSession, user, subscription: Subscription) 
 
         ok = await _push_to_panel(
             subscription,
-            panel_uuid,
+            panel_user_id,
             active_squads=[],
             expire_at=_aware(subscription.end_date),
             status=SubscriptionStatus.EXPIRED,
@@ -231,7 +232,7 @@ async def finalize_expired(db: AsyncSession, subscription: Subscription) -> bool
     from app.database.crud.user import get_user_by_id
 
     user = await get_user_by_id(db, subscription.user_id)
-    panel_uuid = _resolve_panel_uuid(subscription, user) if user else None
+    panel_user_id = _resolve_panel_user_id(subscription, user) if user else None
 
     subscription.connected_squads = []
     subscription.expire_free_until = None
@@ -240,10 +241,10 @@ async def finalize_expired(db: AsyncSession, subscription: Subscription) -> bool
     await db.refresh(subscription)
 
     ok = False
-    if panel_uuid:
+    if panel_user_id:
         ok = await _push_to_panel(
             subscription,
-            panel_uuid,
+            panel_user_id,
             active_squads=[],
             expire_at=_aware(subscription.end_date),
             status=SubscriptionStatus.EXPIRED,
@@ -323,9 +324,9 @@ async def restore_squads(db: AsyncSession, subscription: Subscription, *, reason
     from app.database.crud.user import get_user_by_id
 
     user = await get_user_by_id(db, subscription.user_id)
-    panel_uuid = _resolve_panel_uuid(subscription, user) if user else None
+    panel_user_id = _resolve_panel_user_id(subscription, user) if user else None
     ok = False
-    if panel_uuid:
+    if panel_user_id:
         # Восстановление идёт при продлении → подписка снова активна: пушим сквады через
         # штатный update_remnawave_user (он выставит корректный статус/expire по end_date).
         ok = await _push_restore_to_panel(db, subscription)
@@ -343,7 +344,7 @@ async def restore_squads(db: AsyncSession, subscription: Subscription, *, reason
 
 async def _push_to_panel(
     subscription: Subscription,
-    panel_uuid: str,
+    panel_user_id: int,
     *,
     active_squads: list[str],
     expire_at: datetime | None,
@@ -377,7 +378,7 @@ async def _push_to_panel(
         service = SubscriptionService()
         async with service.get_api_client() as api:
             await api.update_user(
-                uuid=panel_uuid,
+                user_id=panel_user_id,
                 status=panel_status,
                 expire_at=expire_at_arg,
                 active_internal_squads=list(active_squads),
