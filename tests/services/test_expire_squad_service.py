@@ -250,9 +250,7 @@ async def test_finalize_expired_clears_free_squad(monkeypatch):
         expire_disabled_squads=['sq-eu'],
         expire_free_until=datetime(2026, 7, 10, tzinfo=UTC),
     )
-    with patch(
-        'app.database.crud.user.get_user_by_id', AsyncMock(return_value=SimpleNamespace(remnawave_id=12345))
-    ):
+    with patch('app.database.crud.user.get_user_by_id', AsyncMock(return_value=SimpleNamespace(remnawave_id=12345))):
         done = await svc.finalize_expired(_fake_db(), sub)
 
     assert done is True
@@ -288,9 +286,7 @@ async def test_restore_squads_pushes_and_clears(monkeypatch):
     monkeypatch.setattr(svc, '_push_restore_to_panel', push)
     monkeypatch.setattr(svc, '_resolve_panel_user_id', lambda sub, user: 12345)
 
-    with patch(
-        'app.database.crud.user.get_user_by_id', AsyncMock(return_value=SimpleNamespace(remnawave_id=12345))
-    ):
+    with patch('app.database.crud.user.get_user_by_id', AsyncMock(return_value=SimpleNamespace(remnawave_id=12345))):
         restored = await svc.restore_squads(db, sub, reason='test')
 
     assert restored is True
