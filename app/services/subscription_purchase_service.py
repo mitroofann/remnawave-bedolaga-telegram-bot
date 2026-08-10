@@ -1101,8 +1101,17 @@ class MiniAppSubscriptionPurchaseService:
             subscription.device_limit = pricing.selection.devices
             subscription.connected_squads = pricing.selection.servers
 
+            # [Форк] Выход из free-окна (expire_squad_service ветка B) на платные сервера:
+            # база строго now, остаток бесплатных дней НЕ прибавляется (иначе 30 + остаток free
+            # вместо 30). Признак выхода — активное free-окно либо отложенные expire-сквады,
+            # которые дальше чистит update_remnawave_user (apply_restore_fields при reset_traffic).
+            from app.services import expire_squad_service as _exp_squad_svc
+
+            _leaving_free_window = _exp_squad_svc.is_free_window_active(
+                subscription, now=now
+            ) or _exp_squad_svc.has_expire_disabled_squads(subscription)
             extension_base_date = now
-            if subscription.end_date and subscription.end_date > now:
+            if subscription.end_date and subscription.end_date > now and not _leaving_free_window:
                 extension_base_date = subscription.end_date
             else:
                 subscription.start_date = now

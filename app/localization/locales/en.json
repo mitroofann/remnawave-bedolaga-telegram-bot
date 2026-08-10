@@ -1790,6 +1790,7 @@
   "DAILY_SUBSCRIPTION_RESUMED": "▶️ Subscription resumed!",
   "DAILY_SUBSCRIPTION_RESUMED_AFTER_TOPUP": "✅ <b>Subscription resumed!</b>\n\nYour daily plan «{tariff_name}» has been resumed after balance top-up.\n\n💳 Charged: {amount}\n💰 Remaining: {balance}",
   "WEBHOOK_SUB_EXPIRED": "❌ <b>Subscription{tariff_label} expired</b>\n\nYour subscription has ended. Renew to restore VPN access.",
+  "WEBHOOK_SUB_EXPIRE_FREE": "⏳ <b>Subscription expired — free access enabled</b>\n\nYour subscription period has ended, so the main servers are disabled. But we've left you free access on: <b>{server_names}</b> with speed limits for {days_left} d.\n\n💡 Renew your subscription to get all servers and full speed back.",
   "WEBHOOK_SUB_DISABLED": "🚫 <b>Subscription{tariff_label} disabled</b>\n\nYour subscription has been disabled by the administrator.",
   "WEBHOOK_SUB_ENABLED": "✅ <b>Subscription{tariff_label} activated</b>\n\nYour subscription is active again. Enjoy!",
   "WEBHOOK_SUB_LIMITED": "⚠️ <b>Traffic limit reached</b>\n\nYou have used all available traffic for your subscription{tariff_label}. Purchase additional traffic or wait for a reset.",

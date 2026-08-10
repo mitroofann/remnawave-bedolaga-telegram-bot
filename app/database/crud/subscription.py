@@ -1088,6 +1088,20 @@ async def extend_subscription(
     # Включает переход из классического режима (tariff_id=None) в тарифный
     is_tariff_change = tariff_id is not None and (subscription.tariff_id is None or tariff_id != subscription.tariff_id)
 
+    # [Форк] Выход из free-окна (expire_squad_service ветка B) либо возврат сквадов, отложенных
+    # при истечении (ветка A), на платные сервера. Покупатель платит за тариф и должен получить
+    # РОВНО его период от текущего момента, а не текущий момент + остаток бесплатных дней —
+    # иначе получается 30 + остаток free вместо 30 (баг). Реальный end_date во free-окне
+    # в прошлом, но если он каким-то путём просочился в будущее (панельный expireAt), ветка
+    # ниже прибавила бы оплаченные дни к нему. Помечаем: было free-окно/отложенные expire-сквады
+    # → база продления = current_time, остаток не переносится. apply_restore_fields ниже
+    # (для days > 0) чистит маркеры и возвращает реальные сквады.
+    from app.services import expire_squad_service as _exp_squad_svc
+
+    _was_in_free_window = _exp_squad_svc.is_free_window_active(
+        subscription
+    ) or _exp_squad_svc.has_expire_disabled_squads(subscription)
+
     # Флаг: была ли housekeeping-ветка вызвана. Если нет — в конце прогоним
     # _housekeep_expired_purchases как fallback, чтобы истёкшие пакеты не копились
     # на путях renewal в multi-tariff (SubscriptionRenewalService и т.п.).
@@ -1103,6 +1117,14 @@ async def extend_subscription(
     if is_tariff_change:
         logger.info('🔄 Обнаружена СМЕНА тарифа', tariff_id=subscription.tariff_id, tariff_id_2=tariff_id)
 
+    if _was_in_free_window and days > 0:
+        logger.info(
+            'expire-squad: продление/смена выходит из free-окна — база now, остаток бесплатных дней не переносится',
+            subscription_id=subscription.id,
+            days=days,
+            end_date=subscription.end_date,
+        )
+
     if days < 0:
         subscription.end_date = subscription.end_date + timedelta(days=days)
         logger.info('📅 Срок подписки уменьшен', abs=abs(days), end_date=subscription.end_date)
@@ -1112,8 +1134,11 @@ async def extend_subscription(
         # TRIAL_ADD_REMAINING_DAYS_TO_PAID) ИЛИ бесплатный 0₽ тариф
         # (TARIFF_SWITCH_RESET_FREE_DAYS) — иначе наспамленные на бесплатке дни
         # бесплатно уносятся на платный тариф.
+        # [Форк] Выход из free-окна (ветка B expire_squad_service) = тоже НЕ переносим
+        # «остаток»: панельный expireAt (expire_free_until) копился бесплатно и не должен
+        # добавляться к оплаченному периоду.
         remaining_seconds = 0
-        if subscription.end_date and subscription.end_date > current_time:
+        if subscription.end_date and subscription.end_date > current_time and not _was_in_free_window:
             source_is_free = bool(
                 settings.TARIFF_SWITCH_RESET_FREE_DAYS
                 and subscription.tariff_id  # ещё старый тариф — переназначается ниже
@@ -1141,13 +1166,16 @@ async def extend_subscription(
             days=days,
             remaining_seconds=int(remaining_seconds),
         )
-    elif subscription.end_date > current_time:
+    elif subscription.end_date > current_time and not _was_in_free_window:
         # Подписка активна - просто добавляем дни к текущей дате окончания
         # БЕЗ бонусных дней (они уже учтены в end_date)
         subscription.end_date = subscription.end_date + timedelta(days=days)
         logger.info('📅 Подписка активна, добавляем дней к текущей дате окончания', days=days)
     else:
-        # Подписка истекла - начинаем с текущей даты
+        # Подписка истекла - начинаем с текущей даты.
+        # [Форк] Сюда же попадает выход из free-окна (ветка B): end_date в прошлом (или был
+        # затёрт будущим панельным expireAt, но _was_in_free_window=True) — база строго now,
+        # оплаченные дни НЕ прибавляются к остатку бесплатных.
         subscription.end_date = current_time + timedelta(days=days)
         logger.info('📅 Подписка истекла, устанавливаем новую дату окончания', days=days)
 

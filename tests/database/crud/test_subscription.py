@@ -78,6 +78,12 @@ async def test_extend_subscription_convert_trial_false_keeps_trial(monkeypatch):
         connected_squads=[],
         purchased_traffic_gb=0,
         updated_at=now,
+        # [Форк] Поля фичи expire_squad/traffic_limit, иначе SimpleNamespace падает в
+        # traffic_limit_squad_service.apply_restore_fields (extend_subscription, days>0).
+        expire_disabled_squads=[],
+        expire_free_until=None,
+        traffic_limit_disabled_squads=[],
+        traffic_limit_panel_bytes=None,
     )
 
     result = await extend_subscription(db, sub, 14, tariff_id=2, convert_trial=False, commit=False)
@@ -121,11 +127,140 @@ async def test_extend_subscription_default_converts_trial_on_purchase(monkeypatc
         connected_squads=[],
         purchased_traffic_gb=0,
         updated_at=now,
+        # [Форк] Поля фичи expire_squad/traffic_limit (см. соседний тест).
+        expire_disabled_squads=[],
+        expire_free_until=None,
+        traffic_limit_disabled_squads=[],
+        traffic_limit_panel_bytes=None,
     )
 
     result = await extend_subscription(db, sub, 14, tariff_id=2, commit=False)
 
     assert result.is_trial is False  # genuine purchase converts the trial
+
+
+async def test_extend_subscription_in_free_window_starts_from_now(monkeypatch):
+    """[Форк] Баг «30 + остаток free»: продление подписки в активном free-окне
+    (expire_squad_service ветка B) должно давать РОВНО оплаченный период от now,
+    а не now + остаток бесплатных дней. end_date в это время в прошлом — но если он
+    просочился в будущее (панельный expireAt), база всё равно обязана быть now."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.database.crud.subscription import extend_subscription
+
+    monkeypatch.setattr('app.database.crud.subscription._lock_subscription_row', AsyncMock())
+    monkeypatch.setattr('app.database.crud.subscription._housekeep_expired_purchases', AsyncMock())
+    monkeypatch.setattr('app.database.crud.subscription.clear_notifications', AsyncMock())
+    monkeypatch.setattr(
+        'app.database.crud.tariff.get_tariff_by_id', AsyncMock(return_value=SimpleNamespace(is_daily=False))
+    )
+    monkeypatch.setattr(
+        'app.database.crud.subscription.deactivate_user_trial_subscriptions', AsyncMock(return_value=[])
+    )
+    # Без тариф-чейнджа (один и тот же тариф → продление) _apply_base_limit не вызывается;
+    # но для чистоты мокаем, как в соседних тестах.
+    monkeypatch.setattr(
+        'app.database.crud.subscription._apply_base_limit_preserving_active_purchases',
+        AsyncMock(return_value=(0, 10)),
+    )
+
+    db = AsyncMock()
+    db.flush = AsyncMock()
+
+    now = datetime.now(UTC)
+    # Free-окно активно: expire_free_until в будущем, реальный end_date в прошлом.
+    # Симулируем и «протёкший» будущий end_date (если бы панель успела перезаписать).
+    sub = SimpleNamespace(
+        id=1,
+        user_id=7,
+        status='active',
+        is_trial=False,
+        start_date=now - timedelta(days=10),
+        end_date=now - timedelta(days=5),  # реальный срок давно прошёл
+        expire_free_until=now + timedelta(days=3),  # маркер активного free-окна
+        expire_disabled_squads=['sq-eu'],
+        tariff_id=1,
+        traffic_limit_gb=10,
+        traffic_used_gb=0.0,
+        device_limit=1,
+        connected_squads=['sq-free'],
+        purchased_traffic_gb=0,
+        updated_at=now,
+        traffic_limit_disabled_squads=[],
+        traffic_limit_panel_bytes=None,
+        tariff=SimpleNamespace(is_daily=False, expire_free_squads=['sq-free'], expire_free_days=7),
+    )
+
+    result = await extend_subscription(db, sub, 30, commit=False)
+
+    assert result.end_date > now
+    assert result.end_date <= now + timedelta(days=30, seconds=5), (
+        f'end_date {result.end_date} не должен превышать now+30d: остаток free-дней не должен переноситься'
+    )
+    # Маркеры free-окна очищены (apply_restore_fields при days>0)
+    assert result.expire_disabled_squads == []
+    assert result.expire_free_until is None
+    # Сквады возвращены из отложенных, free-сквад убран
+    assert result.connected_squads == ['sq-eu']
+
+
+async def test_extend_subscription_tariff_change_free_window_does_not_carry_remainder(monkeypatch):
+    """[Форк] Смена тарифа из free-окна: остаток бесплатных дней не переносится
+    в оплаченный период (ветка is_tariff_change с _was_in_free_window)."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.database.crud.subscription import extend_subscription
+
+    monkeypatch.setattr('app.database.crud.subscription._lock_subscription_row', AsyncMock())
+    monkeypatch.setattr('app.database.crud.subscription._housekeep_expired_purchases', AsyncMock())
+    monkeypatch.setattr('app.database.crud.subscription.clear_notifications', AsyncMock())
+    monkeypatch.setattr(
+        'app.database.crud.tariff.get_tariff_by_id', AsyncMock(return_value=SimpleNamespace(is_daily=False))
+    )
+    monkeypatch.setattr(
+        'app.database.crud.subscription.deactivate_user_trial_subscriptions', AsyncMock(return_value=[])
+    )
+    monkeypatch.setattr(
+        'app.database.crud.subscription._apply_base_limit_preserving_active_purchases',
+        AsyncMock(return_value=(0, 10)),
+    )
+    # Прямой вызов helper не должен ничего добавлять
+    monkeypatch.setattr('app.database.crud.subscription._should_carry_remaining_days', Mock(return_value=True))
+
+    db = AsyncMock()
+    db.flush = AsyncMock()
+
+    now = datetime.now(UTC)
+    sub = SimpleNamespace(
+        id=1,
+        user_id=7,
+        status='active',
+        is_trial=False,
+        start_date=now - timedelta(days=10),
+        end_date=now - timedelta(days=5),
+        expire_free_until=now + timedelta(days=3),
+        expire_disabled_squads=['sq-eu'],
+        tariff_id=1,
+        traffic_limit_gb=10,
+        traffic_used_gb=0.0,
+        device_limit=1,
+        connected_squads=['sq-free'],
+        purchased_traffic_gb=0,
+        updated_at=now,
+        traffic_limit_disabled_squads=[],
+        traffic_limit_panel_bytes=None,
+        tariff=SimpleNamespace(is_daily=False, expire_free_squads=['sq-free'], expire_free_days=7),
+    )
+
+    result = await extend_subscription(db, sub, 30, tariff_id=2, commit=False)
+
+    assert result.tariff_id == 2
+    assert result.end_date > now
+    assert result.end_date <= now + timedelta(days=30, seconds=5), (
+        f'end_date {result.end_date}: смена тарифа из free-окна не должна переносить остаток'
+    )
+    assert result.expire_disabled_squads == []
+    assert result.expire_free_until is None
 
 
 def _trial_sub(sub_id, user_id, panel_user_id):

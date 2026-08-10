@@ -2539,8 +2539,16 @@ class Subscription(Base):
         return min((used / self.traffic_limit_gb) * 100, 100.0)
 
     def extend_subscription(self, days: int):
+        # [Форк] Выход из free-окна (expire_squad_service ветка B) / возврат отложенных при
+        # истечении сквадов (ветка A): база строго now, остаток бесплатных дней не прибавляется
+        # к оплаченному периоду (иначе 30 + остаток free вместо 30).
+        from app.services import expire_squad_service as _exp_squad_svc
+
+        _leaving_free_window = _exp_squad_svc.is_free_window_active(self) or _exp_squad_svc.has_expire_disabled_squads(
+            self
+        )
         end = _aware(self.end_date)
-        if end and end > datetime.now(UTC):
+        if end and end > datetime.now(UTC) and not _leaving_free_window:
             self.end_date = end + timedelta(days=days)
         else:
             self.end_date = datetime.now(UTC) + timedelta(days=days)

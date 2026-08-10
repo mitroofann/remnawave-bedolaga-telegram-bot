@@ -1539,11 +1539,21 @@ class RemnaWaveWebhookService:
         # могли бы «вернуться» после обнуления (см. crud.reset_subscription). Статус
         # отдельно синхронизируется ниже: при panel ACTIVE + future end_date подписка
         # всё равно может корректно реактивироваться через обычное продление/активацию.
+        #
+        # [Форк] Пока активно free-окно (expire_squad_service ветка B) мы сами запушили на
+        # панель expireAt = now + N дней, тогда как реальный end_date уже в прошлом. Панель
+        # вернёт ACTIVE + этот будущий expireAt → блок ниже затёр бы реальный end_date будущей
+        # датой = порча биллинга: последующая покупка/продление прибавила бы платные дни к
+        # «остатку» free-окна (баг: 30 + 10 вместо 30). Короткое замыкание: не синкаем
+        # end_date из панели во free-окне (зерогрант panel-to-bot sync в сервисе синка).
+        webhook_now = datetime.now(UTC)
+        free_window_active = expire_squad_service.is_free_window_active(subscription, now=webhook_now)
         expire_at = data.get('expireAt')
         if (
             expire_at
             and not grace_open
             and not stale_expired_retry
+            and not free_window_active
             and subscription.status != SubscriptionStatus.DISABLED.value
         ):
             try:
@@ -1562,6 +1572,13 @@ class RemnaWaveWebhookService:
                         )
             except (ValueError, TypeError):
                 pass
+        elif expire_at and free_window_active and subscription.status != SubscriptionStatus.DISABLED.value:
+            logger.info(
+                'Webhook: пропуск синка end_date из панели — активно free-окно (ветка B)',
+                subscription_id=subscription.id,
+                user_id=user.id,
+                panel_expire_at=expire_at,
+            )
 
         # Sync status from panel
         panel_status = data.get('status')

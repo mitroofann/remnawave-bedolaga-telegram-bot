@@ -30,6 +30,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+# Алиас-тип для isinstance: имя datetime в модуле тесты могут патчить
+# (patch('...expire_squad_service.datetime')), а isinstance требует именно класс.
+_DATETIME_TYPE = datetime
+
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -57,9 +61,11 @@ def is_free_window_active(subscription: Subscription, *, now: datetime | None = 
     Пока True — все места, флипающие ACTIVE+прошедший end_date → EXPIRED или синкающие
     end_date из панели, должны сделать короткое замыкание, иначе сломают free-окно.
     """
-    until = _aware(getattr(subscription, 'expire_free_until', None))
-    if until is None:
+    until = getattr(subscription, 'expire_free_until', None)
+    # Defensive: не-datetime (битые данные, MagicMock в тестах) ≠ активное free-окно.
+    if not isinstance(until, _DATETIME_TYPE):
         return False
+    until = _aware(until)
     if now is None:
         now = datetime.now(UTC)
     return until > now
