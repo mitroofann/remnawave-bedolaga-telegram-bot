@@ -74,6 +74,48 @@ from app.utils.subscription_utils import (
 from app.utils.timezone import format_local_datetime
 
 
+async def _can_try_auto_extend_later(subscription) -> bool:
+    """Проверяет, может ли подписка быть автопродлена позже.
+
+    Автопродление требует:
+    1. Статус EXPIRED (не TRIAL, не DISABLED)
+    2. autopay_enabled=True (пользователь явно включил)
+    3. Истекла ≤ 30 дней назад
+    4. Тариф активен и имеет периоды продления
+
+    Если все условия выполняются — не выдаём free-окно сейчас,
+    дадим try_auto_extend_expired_after_topup шанс продлить при пополнении.
+    """
+    from app.database.models import SubscriptionStatus
+
+    # Условие 1: статус должен быть EXPIRED
+    if subscription.status != SubscriptionStatus.EXPIRED.value:
+        return False
+
+    # Условие 2: не триал
+    if getattr(subscription, 'is_trial', None) is not False:
+        return False
+
+    # Условие 3: autopay включён пользователем
+    if not bool(getattr(subscription, 'autopay_enabled', False)):
+        return False
+
+    # Условие 4: истекла ≤ 30 дней назад
+    if subscription.end_date is None:
+        return False
+    expired_delta = datetime.now(UTC) - subscription.end_date
+    if expired_delta.days > 30:
+        return False
+
+    # Условие 5: тариф активен (если есть)
+    tariff = getattr(subscription, 'tariff', None)
+    if tariff is not None and not getattr(tariff, 'is_active', True):
+        return False
+
+    # Все условия выполнены — есть шанс автопродления
+    return True
+
+
 def resolve_autopay_period_candidate(candidate, tariff) -> int | None:
     """Return ``candidate`` only if it is a valid renewal period for ``tariff``.
 
@@ -589,7 +631,24 @@ class MonitoringService:
                 from app.services import expire_squad_service as _ess
 
                 handled_by_expire_squad = False
-                if _ess.should_handle_on_expiry(subscription):
+
+                # [Форк] Free-окно — последний рубеж: не выдаём его, если есть шанс автопродления.
+                # Автопродление требует autopay_enabled=True и статуса EXPIRED; если мы сейчас
+                # выдадим free-окно (статус ACTIVE + expire_free_until), try_auto_extend_expired_after_topup
+                # пропустит эту подписку (status != EXPIRED). Проверяем условия автопродления ДО выдачи free.
+                can_auto_extend = await _can_try_auto_extend_later(subscription)
+                if can_auto_extend:
+                    logger.info(
+                        'expire-squad: пропуск free-окна — подписка подходит под автопродление',
+                        subscription_id=subscription.id,
+                        user_id=subscription.user_id,
+                        autopay_enabled=getattr(subscription, 'autopay_enabled', None),
+                    )
+                    # Не снимаем сквады и не выдаём free — пусть мониторинг выставит EXPIRED,
+                    # а try_auto_extend_expired_after_topup попробует продлить при пополнении.
+                    handled_by_expire_squad = False
+
+                if not handled_by_expire_squad and _ess.should_handle_on_expiry(subscription):
                     try:
                         handled_by_expire_squad = await _ess.handle_expiration(db, user, subscription)
                     except Exception as _ess_err:

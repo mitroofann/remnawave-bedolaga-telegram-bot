@@ -1607,7 +1607,27 @@ class RemnaWaveWebhookService:
                     and not getattr(subscription, 'is_daily_paused', False)
                 )
                 is_free_window = expire_squad_service.is_free_window_active(subscription, now=now)
-                if (
+
+                # [Форк] Free-окно — последний рубеж: не выдаём его через вебхук, если есть шанс автопродления.
+                # Вебхуки от панели приходят асинхронно; если подписка подходит под try_auto_extend_expired_after_topup,
+                # оставим статус EXPIRED для последующего продления при пополнении.
+                # Inline-проверка условий автопродления (избегаем циклического импорта из monitoring_service).
+                can_auto_extend = (
+                    panel_status == 'EXPIRED'  # статус в панели = EXPIRED
+                    and getattr(subscription, 'is_trial', None) is False  # не триал
+                    and bool(getattr(subscription, 'autopay_enabled', False))  # autopay включён
+                    and subscription.end_date is not None  # end_date задан
+                    and (datetime.now(UTC) - subscription.end_date).days <= 30  # истекла ≤ 30 дней
+                    and (tariff is None or getattr(tariff, 'is_active', True))  # тариф активен или отсутствует
+                )
+                if can_auto_extend:
+                    logger.info(
+                        'Webhook: пропуск free-окна — подписка подходит под автопродление (пополнение позже)',
+                        subscription_id=subscription.id,
+                        user_id=user.id,
+                        autopay_enabled=getattr(subscription, 'autopay_enabled', None),
+                    )
+                elif (
                     not is_active_daily
                     and not is_free_window
                     and await self._handle_expire_squads(db, user, subscription, data)
