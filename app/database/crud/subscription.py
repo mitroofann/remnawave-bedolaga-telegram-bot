@@ -1436,6 +1436,47 @@ async def extend_subscription(
         except Exception as trial_err:
             logger.warning('Failed to deactivate trials on extend', error=trial_err)
 
+    # [Форк] Уведомление при выходе из free-окна: если продление вывело подписку из
+    # бесплатного доступа — сообщаем пользователю, что нужно обновить подписку в приложении.
+    if _was_in_free_window and days > 0:
+        try:
+            from app.services.notification_delivery_service import notification_delivery_service
+
+            user = await get_user_by_id(db, subscription.user_id)
+            if user:
+                texts = get_texts(user.language)
+                message = texts.get('SUBSCRIPTION_RENEWED_FROM_FREE')
+                if message:
+                    from aiogram.types import InlineKeyboardMarkup
+
+                    keyboard = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                build_miniapp_or_callback_button(
+                                    text='🔄 Обновить подписку',
+                                    callback_data='refresh_subscription',
+                                )
+                            ],
+                        ]
+                    )
+                    await notification_delivery_service.send_notification(
+                        user=user,
+                        text=message,
+                        parse_mode='HTML',
+                        reply_markup=keyboard,
+                    )
+                    logger.info(
+                        '📧 Отправлено уведомление о необходимости обновить подписку (выход из free-окна)',
+                        subscription_id=subscription.id,
+                        user_id=user.id,
+                    )
+        except Exception as notify_err:
+            logger.warning(
+                'Не удалось отправить уведомление о выходе из free-окна',
+                subscription_id=subscription.id,
+                error=notify_err,
+            )
+
     logger.info('✅ Подписка продлена', end_date=subscription.end_date)
     logger.info('📊 Новые параметры подписки', status=subscription.status, end_date=subscription.end_date)
 

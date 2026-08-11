@@ -1212,6 +1212,45 @@ class MiniAppSubscriptionPurchaseService:
                 action='create' if getattr(subscription, 'remnawave_id', None) is None else 'update',
             )
 
+        # [Форк] Уведомление при выходе из free-окна: если покупка вывела подписку из
+        # бесплатного доступа — сообщаем пользователю, что нужно обновить подписку в приложении.
+        if _leaving_free_window:
+            try:
+                from app.services.notification_delivery_service import notification_delivery_service
+
+                texts = get_texts(user.language)
+                message = texts.get('SUBSCRIPTION_RENEWED_FROM_FREE')
+                if message:
+                    from aiogram.types import InlineKeyboardMarkup
+
+                    keyboard = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                build_miniapp_or_callback_button(
+                                    text='🔄 Обновить подписку',
+                                    callback_data='refresh_subscription',
+                                )
+                            ],
+                        ]
+                    )
+                    await notification_delivery_service.send_notification(
+                        user=user,
+                        text=message,
+                        parse_mode='HTML',
+                        reply_markup=keyboard,
+                    )
+                    logger.info(
+                        '📧 Отправлено уведомление о необходимости обновить подписку (MiniApp, выход из free-окна)',
+                        subscription_id=subscription.id,
+                        user_id=user.id,
+                    )
+            except Exception as notify_err:
+                logger.warning(
+                    'Не удалось отправить уведомление о выходе из free-окна (MiniApp)',
+                    subscription_id=subscription.id,
+                    error=notify_err,
+                )
+
         transaction = await create_transaction(
             db=db,
             user_id=user.id,

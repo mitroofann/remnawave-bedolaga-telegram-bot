@@ -1679,6 +1679,7 @@
   "DAILY_SUBSCRIPTION_RESUMED_AFTER_TOPUP": "✅ <b>订阅已恢复！</b>\n\n您的日套餐「{tariff_name}」已在充值后恢复。\n\n💳 扣费：{amount}\n💰 余额：{balance}",
   "WEBHOOK_SUB_EXPIRED": "❌ <b>订阅{tariff_label}已过期</b>\n\n您的订阅已结束。请续订以恢复VPN访问。",
   "WEBHOOK_SUB_EXPIRE_FREE": "⏳ <b>订阅已过期，自动续订失败 — 已启用免费访问</b>\n\n您的订阅期已结束，因此主服务器已停用。但我们为您保留免费访问：<b>{server_names}</b>，限速 {days_left} 天。\n\n📆 续订订阅以恢复所有服务器和高速连接。\n\n💡 在应用中更新订阅以获取免费服务器（更新按钮位于 Bulka VPN 名称旁边）。",
+  "SUBSCRIPTION_RENEWED_FROM_FREE": "✅ <b>订阅已续订！</b>\n\n您已成功续订订阅。要返回付费服务器，请在 Bulka VPN 应用中更新您的订阅。\n\n💡 点击应用名称旁边的\"更新\"按钮。",
   "WEBHOOK_SUB_DISABLED": "🚫 <b>订阅{tariff_label}已被禁用</b>\n\n您的订阅已被管理员禁用。",
   "WEBHOOK_SUB_ENABLED": "✅ <b>订阅{tariff_label}已激活</b>\n\n您的订阅已重新激活。祝使用愉快！",
   "WEBHOOK_SUB_LIMITED": "⚠️ <b>已达到流量限制</b>\n\n您已用完订阅{tariff_label}的所有可用流量。请购买额外流量或等待重置。",
