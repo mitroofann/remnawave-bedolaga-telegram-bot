@@ -30,15 +30,16 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-# Алиас-тип для isinstance: имя datetime в модуле тесты могут патчить
-# (patch('...expire_squad_service.datetime')), а isinstance требует именно класс.
-_DATETIME_TYPE = datetime
-
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database.models import Subscription, SubscriptionStatus, _aware
+
+
+# Алиас-тип для isinstance: имя datetime в модуле тесты могут патчить
+# (patch('...expire_squad_service.datetime')), а isinstance требует именно класс.
+_DATETIME_TYPE = datetime
 
 
 logger = structlog.get_logger(__name__)
