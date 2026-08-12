@@ -71,9 +71,11 @@ from ..schemas.users import (
     AssignReferrerRequest,
     AssignReferrerResponse,
     DeleteDeviceResponse,
+    DeleteSavedCardResponse,
     DeleteUserRequest,
     DeleteUserResponse,
     DeviceInfo,
+    DisableAutopayResponse,
     DisableUserRequest,
     DisableUserResponse,
     FullDeleteUserRequest,
@@ -90,6 +92,7 @@ from ..schemas.users import (
     ResetSubscriptionResponse,
     ResetTrialRequest,
     ResetTrialResponse,
+    SavedCardsListResponse,
     SendUserMessageRequest,
     SendUserMessageResponse,
     SortByEnum,
@@ -4504,3 +4507,178 @@ def _build_gift_item(
         paid_at=p.paid_at,
         delivered_at=p.delivered_at,
     )
+
+
+# === Autopay & Saved Cards Management (Admin) ===
+
+
+@router.post('/{user_id}/subscriptions/{sub_id}/disable-autopay', response_model=DisableAutopayResponse)
+async def disable_autopay_admin(
+    user_id: int,
+    sub_id: int,
+    admin: User = Depends(require_permission('users:subscription')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Админское отключение автопродления для конкретной подписки пользователя.
+
+    Проверяет права доступа (только админ). Отключает autopay_enabled на уровне
+    подписки и отменяет рекуррентные платежи на стороне платёжных шлюзов (Platega/Lava).
+    """
+    # IDOR-guard: проверяем, что подписка принадлежит указанному пользователю
+    subscription = await _get_owned_subscription_or_404(db, sub_id, user_id)
+
+    old_state = subscription.autopay_enabled
+    subscription.autopay_enabled = False
+    await db.commit()
+    await db.refresh(subscription)
+
+    # Отменяем рекуррентные платежи на стороне шлюзов (idempotent)
+    from app.services.payment.lava import cancel_lava_recurring_for_subscription_safe
+    from app.services.payment.platega import cancel_platega_recurring_for_subscription_safe
+
+    await cancel_platega_recurring_for_subscription_safe(db, subscription.id)
+    await cancel_lava_recurring_for_subscription_safe(db, subscription.id)
+
+    state_text = 'enabled' if old_state else 'already disabled'
+    logger.info(
+        'Admin disabled autopay for subscription',
+        admin_id=admin.id,
+        user_id=user_id,
+        subscription_id=sub_id,
+        previous_state=state_text,
+    )
+
+    message = 'Autopay disabled' if old_state else 'Autopay was already disabled'
+    return DisableAutopayResponse(success=True, message=message)
+
+
+@router.get('/{user_id}/saved-cards', response_model=SavedCardsListResponse)
+async def get_user_saved_cards_admin(
+    user_id: int,
+    subscription_id: int | None = Query(None, description='Filter cards by subscription'),
+    admin: User = Depends(require_permission('users:read')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Получить список сохранённых карт пользователя с опциональным фильтром по подписке.
+
+    Данные берутся из таблицы SavedPaymentMethod. Возвращает массив SavedPaymentCard.
+    """
+    from app.database.crud.saved_payment_method import get_active_payment_methods_by_user
+
+    # Проверяем существование пользователя
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='User not found',
+        )
+
+    # Получаем все активные карты пользователя
+    methods = await get_active_payment_methods_by_user(db, user_id)
+
+    # Если указан subscription_id — логируем для аудита
+    if subscription_id is not None:
+        # Проверяем, что подписка принадлежит пользователю (IDOR-guard)
+        subscription = await _get_owned_subscription_or_404(db, subscription_id, user_id)
+        logger.info(
+            'Admin viewed saved cards for user with subscription filter',
+            admin_id=admin.id,
+            user_id=user_id,
+            subscription_id=subscription_id,
+        )
+    else:
+        logger.info(
+            'Admin viewed saved cards for user',
+            admin_id=admin.id,
+            user_id=user_id,
+        )
+
+    cards = []
+    for m in methods:
+        card_type_raw = m.card_type or m.method_type or 'unknown'
+        card_type = card_type_raw.lower().strip()
+
+        # Парсим expiry из строки в числа
+        expires_month = None
+        expires_year = None
+        if m.card_expiry_month and m.card_expiry_year:
+            try:
+                expires_month = int(m.card_expiry_month)
+                expires_year = int(m.card_expiry_year)
+            except (ValueError, TypeError):
+                pass
+
+        cards.append(
+            SavedPaymentCard(
+                id=str(m.id),
+                card_type=card_type,
+                last4=m.card_last4 or '',
+                expires_month=expires_month,
+                expires_year=expires_year,
+                is_default=False,  # В текущей модели нет флага is_default
+                created_at=m.created_at,
+            )
+        )
+
+    return SavedCardsListResponse(cards=cards, total=len(cards))
+
+
+@router.delete('/{user_id}/saved-cards/{card_id}', response_model=DeleteSavedCardResponse)
+async def delete_user_saved_card_admin(
+    user_id: int,
+    card_id: str,
+    subscription_id: int | None = Query(None, description='Subscription context (optional)'),
+    admin: User = Depends(require_permission('users:edit')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Удалить сохранённую карту пользователя через API платёжного шлюза.
+
+    Проверка прав доступа. Опциональный query параметр subscription_id.
+    Возвращает { success: true, message: "..." }.
+    """
+    from app.database.crud.saved_payment_method import deactivate_payment_method
+
+    # Проверяем существование пользователя
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='User not found',
+        )
+
+    # Если указан subscription_id — проверяем принадлежность (IDOR-guard)
+    if subscription_id is not None:
+        subscription = await _get_owned_subscription_or_404(db, subscription_id, user_id)
+        logger.info(
+            'Admin deleted saved card for user with subscription context',
+            admin_id=admin.id,
+            user_id=user_id,
+            card_id=card_id,
+            subscription_id=subscription_id,
+        )
+
+    # Пытаемся деактивировать карту
+    try:
+        card_id_int = int(card_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Invalid card ID format',
+        )
+
+    success = await deactivate_payment_method(db, card_id_int, user_id)
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Saved card not found',
+        )
+
+    logger.info(
+        'Admin deleted saved card for user',
+        admin_id=admin.id,
+        user_id=user_id,
+        card_id=card_id,
+    )
+
+    return DeleteSavedCardResponse(success=True, message='Saved card deleted successfully')
