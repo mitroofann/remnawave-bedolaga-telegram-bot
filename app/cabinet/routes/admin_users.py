@@ -93,6 +93,7 @@ from ..schemas.users import (
     ResetTrialRequest,
     ResetTrialResponse,
     SavedCardsListResponse,
+    SavedPaymentCard,
     SendUserMessageRequest,
     SendUserMessageResponse,
     SortByEnum,
@@ -323,6 +324,40 @@ async def _build_subscription_info_async(db: AsyncSession, subscription: Subscri
         if record:
             info.sbp_recurring_status = record.status
             info.sbp_recurring_id = record.id
+
+    # Fetch saved payment cards for the user (cards are user-level, not subscription-level)
+    from app.database.crud.saved_payment_method import get_active_payment_methods_by_user
+
+    user = await get_user_by_id(db, subscription.user_id)
+    if user:
+        methods = await get_active_payment_methods_by_user(db, user.id)
+        saved_cards = []
+        for m in methods:
+            card_type_raw = m.card_type or m.method_type or 'unknown'
+            card_type = card_type_raw.lower().strip()
+
+            # Parse expiry from string to numbers
+            expires_month = None
+            expires_year = None
+            if m.card_expiry_month and m.card_expiry_year:
+                try:
+                    expires_month = int(m.card_expiry_month)
+                    expires_year = int(m.card_expiry_year)
+                except (ValueError, TypeError):
+                    pass
+
+            saved_cards.append(
+                SavedPaymentCard(
+                    id=str(m.id),
+                    card_type=card_type,
+                    last4=m.card_last4 or '',
+                    expires_month=expires_month,
+                    expires_year=expires_year,
+                    is_default=False,
+                    created_at=m.created_at,
+                )
+            )
+        info.saved_cards = saved_cards
 
     return info
 

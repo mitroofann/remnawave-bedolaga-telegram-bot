@@ -69,6 +69,7 @@ class UserSubscriptionInfo(BaseModel):
     days_remaining: int = 0
     purchased_traffic_gb: int = 0
     traffic_purchases: list[TrafficPurchaseItem] = []
+    saved_cards: list[SavedPaymentCard] = []  # Saved payment cards for this subscription
 
     # Platega SBP auto-renewal (admin view only — populated by the async
     # builder; the sync builder leaves both at their None default).
