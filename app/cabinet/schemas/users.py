@@ -51,6 +51,42 @@ class TrafficPurchaseItem(BaseModel):
     is_expired: bool
 
 
+# === Saved Payment Cards (Admin) — defined early to avoid forward reference
+
+
+class SavedPaymentCard(BaseModel):
+    """Saved payment card information for admin view."""
+
+    id: str
+    card_type: str  # visa, mastercard, mir и т.д.
+    last4: str  # последние 4 цифры
+    expires_month: int | None = None
+    expires_year: int | None = None
+    is_default: bool = False
+    created_at: datetime | None = None
+
+
+class SavedCardsListResponse(BaseModel):
+    """Response with list of saved payment cards."""
+
+    cards: list[SavedPaymentCard] = []
+    total: int = 0
+
+
+class DisableAutopayResponse(BaseModel):
+    """Response after disabling autopay."""
+
+    success: bool = True
+    message: str = ''
+
+
+class DeleteSavedCardResponse(BaseModel):
+    """Response after deleting a saved card."""
+
+    success: bool = True
+    message: str = ''
+
+
 class UserSubscriptionInfo(BaseModel):
     """User subscription information."""
 
@@ -877,39 +913,3 @@ class AdminUserGiftsResponse(BaseModel):
     received: list[AdminUserGiftItem] = []
     sent_total: int = 0
     received_total: int = 0
-
-
-# === Saved Payment Cards (Admin) ===
-
-
-class SavedPaymentCard(BaseModel):
-    """Saved payment card information for admin view."""
-
-    id: str
-    card_type: str  # visa, mastercard, mir и т.д.
-    last4: str  # последние 4 цифры
-    expires_month: int | None = None
-    expires_year: int | None = None
-    is_default: bool = False
-    created_at: datetime | None = None
-
-
-class SavedCardsListResponse(BaseModel):
-    """Response with list of saved payment cards."""
-
-    cards: list[SavedPaymentCard] = []
-    total: int = 0
-
-
-class DisableAutopayResponse(BaseModel):
-    """Response after disabling autopay."""
-
-    success: bool = True
-    message: str = ''
-
-
-class DeleteSavedCardResponse(BaseModel):
-    """Response after deleting a saved card."""
-
-    success: bool = True
-    message: str = ''
