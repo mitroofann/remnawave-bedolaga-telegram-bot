@@ -18,6 +18,7 @@ from app.database.crud.discount_offer import (
 )
 from app.database.crud.notification import (
     clear_notification_by_type,
+    get_last_notification,
     notification_sent,
     record_notification,
 )
@@ -249,6 +250,7 @@ class MonitoringService:
         self._last_cleanup = datetime.now(UTC)
         self._sla_task = None
         self._expire_squads_task = None
+        self._stale_sub_task = None
         # In-memory fallback состояния уведомлений об ошибке автоплатежа (на случай
         # недоступности Redis). Ключ — (subscription_id, cycle_token=int(end_date.timestamp())).
         self._autopay_fail_state: dict[tuple[int, int], dict] = {}
@@ -377,6 +379,12 @@ class MonitoringService:
         except Exception as e:
             logger.error('Не удалось запустить мониторинг истечения сквадов', error=e)
 
+        try:
+            if not self._stale_sub_task or self._stale_sub_task.done():
+                self._stale_sub_task = asyncio.create_task(self._stale_sub_loop())
+        except Exception as e:
+            logger.error('Не удалось запустить мониторинг несвежих подписок', error=e)
+
         while self.is_running:
             try:
                 await self._monitoring_cycle()
@@ -394,6 +402,8 @@ class MonitoringService:
                 self._sla_task.cancel()
             if self._expire_squads_task and not self._expire_squads_task.done():
                 self._expire_squads_task.cancel()
+            if self._stale_sub_task and not self._stale_sub_task.done():
+                self._stale_sub_task.cancel()
         except Exception:
             pass
 
@@ -417,6 +427,34 @@ class MonitoringService:
             except Exception as error:
                 logger.error('Ошибка в цикле проверки истечения сквадов', error=error)
             await asyncio.sleep(interval_seconds)
+
+    async def _stale_sub_loop(self):
+        """[Форк] Цикл суточной проверки «несвежих» подписок (NOTIFY_STALE_SUB_*).
+
+        Отдельная задача (не внутри часового _monitoring_cycle): тикает раз в минуту и
+        запускает проверку только когда наступает настраиваемое время HH:MM.
+        """
+        from app.services import stale_sub_service as _sss
+
+        while self.is_running:
+            try:
+                now = datetime.now(UTC)
+                if not _sss._check_time_due(now, settings.get_stale_sub_check_time()):
+                    await asyncio.sleep(60)
+                    continue
+
+                async with AsyncSessionLocal() as db:
+                    try:
+                        await self._check_stale_subs(db, now=now)
+                        await db.commit()
+                    except Exception as error:
+                        logger.error('Ошибка в проверке несвежих подписок', error=error)
+                        await db.rollback()
+            except asyncio.CancelledError:
+                break
+            except Exception as error:
+                logger.error('Ошибка в цикле проверки несвежих подписок', error=error)
+            await asyncio.sleep(60)
 
     async def _monitoring_cycle(self):
         async with AsyncSessionLocal() as db:
@@ -2796,6 +2834,108 @@ class MonitoringService:
         else:
             tariff_name = subscription.tariff.name if getattr(subscription, 'tariff', None) else None
             await self._send_subscription_expired_notification(user, subscription, tariff_name=tariff_name)
+
+    async def _check_stale_subs(self, db: AsyncSession, *, now: datetime | None = None):
+        """[Форк] Суточная проверка «несвежих» подписок (NOTIFY_STALE_SUB_*).
+
+        Собирает кандидатов (активное устройство + давно не запрашиваемая подписка),
+        шлёт уведомление (одно на пользователя, с перечнем устройств) и записывает
+        дедуп-строку в sent_notifications ('stale_sub') для cooldown-интервала.
+        """
+        from app.services import stale_sub_service as _sss
+
+        if not _sss.is_enabled():
+            return
+        if not self.bot:
+            return
+
+        try:
+            if now is None:
+                now = datetime.now(UTC)
+
+            candidates = await _sss.collect_candidates(db, now=now)
+            sent_count = 0
+            for user, subscription, stale_devices in candidates:
+                try:
+                    cooldown_days = int(getattr(settings, 'NOTIFY_STALE_SUB_COOLDOWN_DAYS', 5) or 0)
+                    last_row = await get_last_notification(
+                        db, user.id, subscription.id, 'stale_sub', days_before=None
+                    )
+                    if _sss.should_skip_repeat(last_row, now=now, cooldown_days=cooldown_days):
+                        continue
+
+                    ok = await self._send_stale_sub_notification(user, subscription, stale_devices)
+                    if ok:
+                        await record_notification(
+                            db, user.id, subscription.id, 'stale_sub', days_before=None, commit=False
+                        )
+                        sent_count += 1
+                except Exception as send_error:
+                    logger.error(
+                        'stale-sub: ошибка уведомления',
+                        user_id=user.id,
+                        subscription_id=subscription.id,
+                        error=send_error,
+                    )
+
+            if sent_count:
+                logger.info('stale-sub: отправлено уведомлений', sent_count=sent_count)
+        except Exception as error:
+            logger.error('stale-sub: ошибка проверки несвежих подписок', error=error)
+
+    async def _send_stale_sub_notification(self, user: User, subscription: Subscription, stale_devices) -> bool:
+        """[Форк] Уведомить пользователя о «несвежей» подписке (перечень устройств).
+
+        Email-only → notification_delivery_service (email+WS). Telegram → _send_message_with_logo
+        с HTML-текстом из локализации; недоступный пользователь → _handle_unreachable_user.
+        """
+        from app.services import stale_sub_service as _sss
+
+        try:
+            device_names = [d.name for d in stale_devices]
+            recommend = bool(getattr(settings, 'NOTIFY_STALE_SUB_RECOMMEND_APPS', True))
+            if not _sss._matches_app_recommendation(device_names):
+                recommend = False
+
+            if not user.telegram_id:
+                return await notification_delivery_service.send_notification(
+                    user=user,
+                    notification_type=NotificationType.STALE_SUBSCRIPTION,
+                    context={'devices': _sss._join_device_names(device_names)},
+                    bot=self.bot,
+                )
+
+            texts = get_texts(user.language)
+            message = _sss.build_message(device_names, recommend, texts=texts)
+            if not message:
+                return False
+
+            from aiogram.types import InlineKeyboardMarkup
+
+            extend_callback = f'se:{subscription.id}' if settings.is_multi_tariff_enabled() else 'subscription_extend'
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [build_miniapp_or_callback_button(text='💎 Продлить подписку', callback_data=extend_callback)],
+                ]
+            )
+
+            await self._send_message_with_logo(
+                chat_id=user.telegram_id,
+                text=message,
+                parse_mode='HTML',
+                reply_markup=keyboard,
+            )
+            return True
+
+        except (TelegramForbiddenError, TelegramBadRequest) as exc:
+            if await self._handle_unreachable_user(user, exc, 'уведомление о несвежей подписке'):
+                return True
+            logger.error(
+                'Не удалось отправить уведомление о несвежей подписке',
+                user_id=user.id,
+                error=exc,
+            )
+            return False
 
     async def _check_traffic_warnings(self, db: AsyncSession):
         """Check subscriptions approaching traffic limit and notify users."""

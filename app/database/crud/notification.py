@@ -51,6 +51,32 @@ async def record_notification(
         await db.commit()
 
 
+async def get_last_notification(
+    db: AsyncSession,
+    user_id: int,
+    subscription_id: int,
+    notification_type: str,
+    days_before: int | None = None,
+) -> SentNotification | None:
+    """Последняя запись об отправленном уведомлении (по убыванию created_at).
+
+    Используется для интервального дедупа: если последняя запись свежее настраиваемого
+    cooldown — повторное уведомление не шлём («запись устаревает сама» по created_at).
+    """
+    result = await db.execute(
+        select(SentNotification)
+        .where(
+            SentNotification.user_id == user_id,
+            SentNotification.subscription_id == subscription_id,
+            SentNotification.notification_type == notification_type,
+            SentNotification.days_before == days_before,
+        )
+        .order_by(SentNotification.created_at.desc())
+        .limit(1)
+    )
+    return result.scalars().first()
+
+
 async def clear_notifications(db: AsyncSession, subscription_id: int, *, commit: bool = True) -> None:
     await db.execute(delete(SentNotification).where(SentNotification.subscription_id == subscription_id))
     if commit:

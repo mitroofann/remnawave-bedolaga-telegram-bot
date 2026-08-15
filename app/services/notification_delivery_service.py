@@ -86,6 +86,9 @@ class NotificationType(Enum):
     WEBHOOK_DEVICE_DELETED = 'webhook_device_deleted'
     WEBHOOK_TORRENT_DETECTED = 'webhook_torrent_detected'
 
+    # [Форк] Уведомление о «несвежей» подписке (stale-sub notifications)
+    STALE_SUBSCRIPTION = 'stale_sub'
+
     # Other
     BROADCAST = 'broadcast'
     PAYMENT_RECEIVED = 'payment_received'

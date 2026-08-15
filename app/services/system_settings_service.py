@@ -385,6 +385,14 @@ class BotConfigurationService:
         'ENABLE_NOTIFICATIONS': 'NOTIFICATIONS',
         'NOTIFICATION_RETRY_ATTEMPTS': 'NOTIFICATIONS',
         'NOTIFICATION_CACHE_HOURS': 'NOTIFICATIONS',
+        # [Форк] stale-sub уведомления — явные key-overrides, т.к. префикс
+        # NOTIFY_STALE_SUB_ не матчится 'NOTIFICATION_'-оверрайдом.
+        'NOTIFY_STALE_SUB_ENABLED': 'NOTIFICATIONS',
+        'NOTIFY_STALE_SUB_CHECK_TIME': 'NOTIFICATIONS',
+        'NOTIFY_STALE_SUB_LAST_SEEN_HOURS': 'NOTIFICATIONS',
+        'NOTIFY_STALE_SUB_LAST_REQUEST_HOURS': 'NOTIFICATIONS',
+        'NOTIFY_STALE_SUB_COOLDOWN_DAYS': 'NOTIFICATIONS',
+        'NOTIFY_STALE_SUB_RECOMMEND_APPS': 'NOTIFICATIONS',
         'MONITORING_LOGS_RETENTION_DAYS': 'MONITORING',
         'MONITORING_INTERVAL': 'MONITORING',
         'TRAFFIC_MONITORING_ENABLED': 'MONITORING',
@@ -495,6 +503,7 @@ class BotConfigurationService:
         'MINIAPP_': 'MINIAPP',
         'MONITORING_': 'MONITORING',
         'NOTIFICATION_': 'NOTIFICATIONS',
+        'NOTIFY_STALE_SUB_': 'NOTIFICATIONS',  # [Форк] stale-sub уведомления
         'SERVER_STATUS': 'SERVER_STATUS',
         'MAINTENANCE_': 'MAINTENANCE',
         'VERSION_CHECK': 'VERSION',
@@ -1072,6 +1081,68 @@ class BotConfigurationService:
             'example': '00:00',
             'warning': 'Время указывается в UTC.',
             'dependencies': 'TRAFFIC_DAILY_CHECK_ENABLED',
+        },
+        'NOTIFY_STALE_SUB_ENABLED': {
+            'description': (
+                '[Форк] Включает суточную проверку «несвежих» подписок: устройство активно '
+                'пользуется, но давно не запрашивало список серверов — шлём уведомление.'
+            ),
+            'format': 'Булево значение.',
+            'example': 'false',
+            'warning': (
+                'При включении проверка выполняется раз в сутки в NOTIFY_STALE_SUB_CHECK_TIME '
+                'и отправляет уведомления активным пользователям.'
+            ),
+            'dependencies': (
+                'NOTIFY_STALE_SUB_CHECK_TIME, NOTIFY_STALE_SUB_LAST_SEEN_HOURS, '
+                'NOTIFY_STALE_SUB_LAST_REQUEST_HOURS, NOTIFY_STALE_SUB_COOLDOWN_DAYS'
+            ),
+        },
+        'NOTIFY_STALE_SUB_CHECK_TIME': {
+            'description': '[Форк] Время суточной проверки «несвежих» подписок в формате HH:MM (UTC).',
+            'format': 'Строка времени HH:MM.',
+            'example': '12:00',
+            'warning': 'Время указывается в UTC.',
+            'dependencies': 'NOTIFY_STALE_SUB_ENABLED',
+        },
+        'NOTIFY_STALE_SUB_LAST_SEEN_HOURS': {
+            'description': (
+                '[Форк] Сколько часов назад устройство было онлайн, чтобы считаться «активным» '
+                '(учитывается lastSeen устройства).'
+            ),
+            'format': 'Целое число часов.',
+            'example': '24',
+            'warning': 'Слишком большое значение = уведомления получат и редко пользующиеся пользователи.',
+            'dependencies': 'NOTIFY_STALE_SUB_ENABLED',
+        },
+        'NOTIFY_STALE_SUB_LAST_REQUEST_HOURS': {
+            'description': (
+                '[Форк] После скольких часов без запроса списка серверов подписка считается «несвежей».'
+            ),
+            'format': 'Целое число часов.',
+            'example': '72',
+            'warning': 'Слишком малое значение = слишком частые уведомления.',
+            'dependencies': 'NOTIFY_STALE_SUB_ENABLED',
+        },
+        'NOTIFY_STALE_SUB_COOLDOWN_DAYS': {
+            'description': (
+                '[Форк] Как долго не отправлять повторное уведомление о «несвежей» подписке тому же '
+                'пользователю (в днях).'
+            ),
+            'format': 'Целое число дней.',
+            'example': '5',
+            'warning': 'Защита от спама уведомлениями по одному и тому же пользователю.',
+            'dependencies': 'NOTIFY_STALE_SUB_ENABLED',
+        },
+        'NOTIFY_STALE_SUB_RECOMMEND_APPS': {
+            'description': (
+                '[Форк] Добавлять ли в уведомление рекомендацию приложений Happ/INCY, если ни в одном '
+                'проблемном устройстве пользователя нет подстроки happ/incy.'
+            ),
+            'format': 'Булево значение.',
+            'example': 'true',
+            'warning': 'Рекомендация не добавляется, если пользователь уже пользуется Happ/INCY.',
+            'dependencies': 'NOTIFY_STALE_SUB_ENABLED',
         },
         'TRAFFIC_DAILY_THRESHOLD_GB': {
             'description': 'Порог суточного трафика в ГБ. При превышении за 24 часа отправляется уведомление.',

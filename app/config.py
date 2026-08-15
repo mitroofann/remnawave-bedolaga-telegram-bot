@@ -298,6 +298,18 @@ class Settings(BaseSettings):
     MONITORING_LOGS_RETENTION_DAYS: int = 30
     NOTIFICATION_CACHE_HOURS: int = 24
 
+    # [Форк] Уведомления о несвежей подписке (stale-sub notifications).
+    # Раз в сутки проверяем активных пользователей: если устройство было онлайн недавно
+    # (LAST_SEEN_HOURS), но давно не запрашивало список серверов (LAST_REQUEST_HOURS) —
+    # шлём уведомление «обновите подписку вручную». Повторная отправка — через
+    # COOLDOWN_DAYS (запись в sent_notifications «устаревает сама» по created_at).
+    NOTIFY_STALE_SUB_ENABLED: bool = False
+    NOTIFY_STALE_SUB_CHECK_TIME: str = '12:00'
+    NOTIFY_STALE_SUB_LAST_SEEN_HOURS: int = 24
+    NOTIFY_STALE_SUB_LAST_REQUEST_HOURS: int = 72
+    NOTIFY_STALE_SUB_COOLDOWN_DAYS: int = 5
+    NOTIFY_STALE_SUB_RECOMMEND_APPS: bool = True
+
     SERVER_STATUS_MODE: str = 'disabled'
     SERVER_STATUS_EXTERNAL_URL: str | None = None
     SERVER_STATUS_METRICS_URL: str | None = None
@@ -1972,6 +1984,11 @@ class Settings(BaseSettings):
     def get_traffic_daily_check_time(self) -> time | None:
         """Возвращает время суточной проверки трафика"""
         times = self.parse_daily_time_list(self.TRAFFIC_DAILY_CHECK_TIME)
+        return times[0] if times else None
+
+    def get_stale_sub_check_time(self) -> time | None:
+        """Возвращает время суточной проверки stale-подписок (HH:MM)"""
+        times = self.parse_daily_time_list(self.NOTIFY_STALE_SUB_CHECK_TIME)
         return times[0] if times else None
 
     def get_display_name_banned_keywords(self) -> list[str]:

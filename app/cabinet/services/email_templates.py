@@ -48,6 +48,7 @@ class EmailNotificationTemplates:
             NotificationType.WINBACK_EXPIRED_1D: self._winback_expired_1d_template,
             NotificationType.WINBACK_DISCOUNT: self._winback_discount_template,
             NotificationType.WINBACK_TRIAL_ENDING: self._winback_trial_ending_template,
+            NotificationType.STALE_SUBSCRIPTION: self._stale_sub_template,  # [Форк]
             NotificationType.AUTOPAY_SUCCESS: self._autopay_success_template,
             NotificationType.AUTOPAY_FAILED: self._autopay_failed_template,
             NotificationType.AUTOPAY_INSUFFICIENT_FUNDS: self._autopay_insufficient_funds_template,
@@ -851,6 +852,30 @@ class EmailNotificationTemplates:
             'en': f'<h2>Your trial is ending soon</h2><div class="highlight warning"><p>Your trial subscription is about to expire.</p><p>Subscribe to keep your VPN — your config and devices stay.</p></div>{self._get_cabinet_button(language)}',
             'zh': f'<h2>试用即将结束</h2><div class="highlight warning"><p>您的试用订阅即将到期。</p><p>订阅以继续使用 VPN — 配置和设备将保留。</p></div>{self._get_cabinet_button(language)}',
             'ua': f'<h2>Пробна підписка скоро закінчиться</h2><div class="highlight warning"><p>Ваша тестова підписка скоро закінчується.</p><p>Оформіть підписку, щоб не залишитися без VPN — конфіг і пристрої збережуться.</p></div>{self._get_cabinet_button(language)}',
+        }
+        return {
+            'subject': subjects.get(language, subjects['ru']),
+            'body_html': self._get_base_template(bodies.get(language, bodies['ru']), language),
+        }
+
+    def _stale_sub_template(self, language: str, context: dict[str, Any]) -> dict[str, str]:
+        """Email: subscription has not requested fresh servers for a long time (email-only users).
+
+        [Форк] stale-sub notifications: device is actively used but the subscription config
+        is stale — advise manual refresh and recommend Happ/INCY apps.
+        """
+        devices = html.escape(str(context.get('devices', '')))
+        subjects = {
+            'ru': 'Обновите подписку',
+            'en': 'Update your subscription',
+            'zh': '更新您的订阅',
+            'ua': 'Оновіть підписку',
+        }
+        bodies = {
+            'ru': f'<h2>Обновите подписку</h2><div class="highlight warning"><p>Мы заметили, что ваше устройство {devices} давно не запрашивало актуальный список серверов.</p><p>Советуем обновить подписку вручную, чтобы всё стабильно работало (в приложении нажмите на кнопку обновления справа от названия Bulka VPN).</p></div>{self._get_cabinet_button(language)}',
+            'en': f'<h2>Update your subscription</h2><div class="highlight warning"><p>We noticed that your device {devices} has not requested the latest server list for a long time.</p><p>We recommend refreshing your subscription manually to keep everything stable (in the app, tap the refresh button next to the Bulka VPN name).</p></div>{self._get_cabinet_button(language)}',
+            'zh': f'<h2>更新您的订阅</h2><div class="highlight warning"><p>我们注意到您的设备 {devices} 已很久未请求最新的服务器列表。</p><p>建议手动更新订阅以确保一切稳定运行（在应用中点击 Bulka VPN 名称旁边的刷新按钮）。</p></div>{self._get_cabinet_button(language)}',
+            'ua': f'<h2>Оновіть підписку</h2><div class="highlight warning"><p>Ми помітили, що ваш пристрій {devices} давно не запитував актуальний список серверів.</p><p>Радимо оновити підписку вручну, щоб усе стабільно працювало (у застосунку натисніть кнопку оновлення праворуч від назви Bulka VPN).</p></div>{self._get_cabinet_button(language)}',
         }
         return {
             'subject': subjects.get(language, subjects['ru']),
