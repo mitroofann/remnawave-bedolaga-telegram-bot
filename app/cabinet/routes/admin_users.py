@@ -4614,7 +4614,7 @@ async def get_user_saved_cards_admin(
     # Если указан subscription_id — логируем для аудита
     if subscription_id is not None:
         # Проверяем, что подписка принадлежит пользователю (IDOR-guard)
-        subscription = await _get_owned_subscription_or_404(db, subscription_id, user_id)
+        await _get_owned_subscription_or_404(db, subscription_id, user_id)
         logger.info(
             'Admin viewed saved cards for user with subscription filter',
             admin_id=admin.id,
@@ -4683,7 +4683,7 @@ async def delete_user_saved_card_admin(
 
     # Если указан subscription_id — проверяем принадлежность (IDOR-guard)
     if subscription_id is not None:
-        subscription = await _get_owned_subscription_or_404(db, subscription_id, user_id)
+        await _get_owned_subscription_or_404(db, subscription_id, user_id)
         logger.info(
             'Admin deleted saved card for user with subscription context',
             admin_id=admin.id,
