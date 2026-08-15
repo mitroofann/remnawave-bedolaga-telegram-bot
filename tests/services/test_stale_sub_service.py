@@ -13,6 +13,7 @@ import pytest
 
 from app.services import stale_sub_service as svc
 
+
 NOW = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
 
 
@@ -114,9 +115,7 @@ def test_classify_device_candidate():
         userAgent='Happ/4.1.0',
     )
     history = {'Happ/4.1.0': datetime(2026, 8, 1, tzinfo=UTC)}  # 9 дней назад
-    stale = svc.classify_device(
-        device, history, now=NOW, last_seen_hours=24, last_request_hours=72
-    )
+    stale = svc.classify_device(device, history, now=NOW, last_seen_hours=24, last_request_hours=72)
     assert stale is not None
     assert stale.name == 'Android/13'
     assert stale.last_seen.hour == 10
@@ -129,10 +128,7 @@ def test_classify_device_skips_when_not_recently_seen():
         userAgent='Happ/4.1.0',
     )
     history = {'Happ/4.1.0': datetime(2026, 8, 1, tzinfo=UTC)}
-    assert (
-        svc.classify_device(device, history, now=NOW, last_seen_hours=24, last_request_hours=72)
-        is None
-    )
+    assert svc.classify_device(device, history, now=NOW, last_seen_hours=24, last_request_hours=72) is None
 
 
 def test_classify_device_skips_when_recently_requested():
@@ -141,27 +137,18 @@ def test_classify_device_skips_when_recently_requested():
         userAgent='Happ/4.1.0',
     )
     history = {'Happ/4.1.0': datetime(2026, 8, 10, 9, tzinfo=UTC)}  # час назад — свежая
-    assert (
-        svc.classify_device(device, history, now=NOW, last_seen_hours=24, last_request_hours=72)
-        is None
-    )
+    assert svc.classify_device(device, history, now=NOW, last_seen_hours=24, last_request_hours=72) is None
 
 
 def test_classify_device_skips_when_no_last_seen():
     device = _make_device(lastSeen=None, updatedAt=None)
-    assert (
-        svc.classify_device(device, {}, now=NOW, last_seen_hours=24, last_request_hours=72)
-        is None
-    )
+    assert svc.classify_device(device, {}, now=NOW, last_seen_hours=24, last_request_hours=72) is None
 
 
 def test_classify_device_skips_when_no_history_match():
     device = _make_device(lastSeen='2026-08-10T10:00:00Z', userAgent='OtherApp/1.0')
     history = {'Happ/4.1.0': datetime(2026, 8, 1, tzinfo=UTC)}
-    assert (
-        svc.classify_device(device, history, now=NOW, last_seen_hours=24, last_request_hours=72)
-        is None
-    )
+    assert svc.classify_device(device, history, now=NOW, last_seen_hours=24, last_request_hours=72) is None
 
 
 def test_classify_device_threshold_zero_disabled():
@@ -185,9 +172,7 @@ def test_filter_candidates_sorts_by_last_seen_desc():
         _make_device(hwid='new', deviceModel='New/1', lastSeen='2026-08-10T11:00:00Z', userAgent='A'),
     ]
     history = {'A': datetime(2026, 8, 1, tzinfo=UTC)}
-    result = svc.filter_candidates(
-        devices, history, now=NOW, last_seen_hours=24, last_request_hours=72, recommend=True
-    )
+    result = svc.filter_candidates(devices, history, now=NOW, last_seen_hours=24, last_request_hours=72, recommend=True)
     assert [d.hwid for d in result] == ['new', 'old']
 
 
@@ -330,7 +315,10 @@ async def test_collect_candidates_skips_when_no_matching_devices(monkeypatch):
     )
     # История свежая (час назад) → не кандидат.
     api.get_subscription_request_history = AsyncMock(
-        return_value={'total': 1, 'records': [_history_record(requestAt='2026-08-10T11:00:00Z', userAgent='Happ/4.1.0')]}
+        return_value={
+            'total': 1,
+            'records': [_history_record(requestAt='2026-08-10T11:00:00Z', userAgent='Happ/4.1.0')],
+        }
     )
     cm = MagicMock()
     cm.__aenter__ = AsyncMock(return_value=api)

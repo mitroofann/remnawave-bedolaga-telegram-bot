@@ -27,7 +27,7 @@ get_subscription_request_history); отправку выполняет Monitorin
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 from typing import Any
 
 import structlog

@@ -2858,9 +2858,7 @@ class MonitoringService:
             for user, subscription, stale_devices in candidates:
                 try:
                     cooldown_days = int(getattr(settings, 'NOTIFY_STALE_SUB_COOLDOWN_DAYS', 5) or 0)
-                    last_row = await get_last_notification(
-                        db, user.id, subscription.id, 'stale_sub', days_before=None
-                    )
+                    last_row = await get_last_notification(db, user.id, subscription.id, 'stale_sub', days_before=None)
                     if _sss.should_skip_repeat(last_row, now=now, cooldown_days=cooldown_days):
                         continue
 

@@ -1116,9 +1116,7 @@ class BotConfigurationService:
             'dependencies': 'NOTIFY_STALE_SUB_ENABLED',
         },
         'NOTIFY_STALE_SUB_LAST_REQUEST_HOURS': {
-            'description': (
-                '[Форк] После скольких часов без запроса списка серверов подписка считается «несвежей».'
-            ),
+            'description': ('[Форк] После скольких часов без запроса списка серверов подписка считается «несвежей».'),
             'format': 'Целое число часов.',
             'example': '72',
             'warning': 'Слишком малое значение = слишком частые уведомления.',
