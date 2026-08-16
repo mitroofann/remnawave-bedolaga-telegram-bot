@@ -1184,6 +1184,27 @@ class RemnaWaveWebhookService:
             await db.commit()
             return
 
+        # [Форк] Stale EXPIRED-ретрай vs локальное продление (аналог гарда в _handle_user_modified).
+        # Панель может прислать user.expired с опозданием/повторно, когда подписка УЖЕ продлена
+        # в боте (end_date в будущем, статус ACTIVE/TRIAL) и сквады восстановлены продлением.
+        # Повторная обработка (ветка A) снова сняла бы только что возвращённые сквады — юзер
+        # видит «при продлении сквады не возвращаются». Локальное продление авторитетнее
+        # устаревшего события → игнорируем такой EXPIRED.
+        if (
+            subscription.end_date is not None
+            and subscription.end_date > datetime.now(UTC)
+            and subscription.status in (SubscriptionStatus.ACTIVE.value, SubscriptionStatus.TRIAL.value)
+        ):
+            logger.info(
+                'Webhook user.expired: игнорируем устаревший ретрай (подписка уже продлена в боте)',
+                subscription_id=subscription.id,
+                user_id=user.id,
+                end_date=subscription.end_date,
+            )
+            self._stamp_webhook_update(subscription)
+            await db.commit()
+            return
+
         # [Форк] Фича снятия сквадов при истечении: вместо простого EXPIRED снимаем все сквады
         # (ветка A) либо выдаём free-сквад и держим доступ N дней (ветка B, с уведомлением).
         # Если фича не применима — падаем в штатную обработку EXPIRED ниже.
@@ -1652,6 +1673,15 @@ class RemnaWaveWebhookService:
                         subscription_status=subscription.status,
                         user_id=user.id,
                     )
+                # [Форк] Внешняя реактивация мимо бота (продление вручную в панели / через
+                # сторонний канал): панель сообщила ACTIVE + будущий срок, а фича снятия
+                # сквадов оставила их отложенными (expire_disabled_squads непуст). Статус
+                # синхронизирован выше, но сквады так и лежат отложенными — следующий пуш
+                # в панель отправил бы пустой connected_squads и снял бы их повторно.
+                # Восстанавливаем (идемпотентно, с пушем на панель). Free-окно (ветка B) не
+                # трогаем: там сквадами управляет сама фича, а её end_date в прошлом.
+                if not free_window_active and expire_squad_service.has_expire_disabled_squads(subscription):
+                    await expire_squad_service.restore_squads(db, subscription, reason='webhook_external_reactivation')
             elif panel_status == 'DISABLED':
                 if subscription.status != SubscriptionStatus.DISABLED.value:
                     subscription.status = SubscriptionStatus.DISABLED.value

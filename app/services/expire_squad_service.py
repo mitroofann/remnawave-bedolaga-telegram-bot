@@ -120,6 +120,16 @@ def should_handle_on_expiry(subscription: Subscription) -> bool:
         return False
     if has_expire_disabled_squads(subscription):
         return True
+    # [Форк-фикс] Живая подписка (end_date в будущем) не может «истечь»: предикат вызывается
+    # и с УСТАРЕВШИМИ снапшотами (запоздалый вебхук user.expired / user.modified(EXPIRED)
+    # после продления, когда сквады уже восстановлены, а маркер expire_disabled_squads очищен).
+    # Снимать только что возвращённые продлением сквады нельзя — юзер видит «при продлении
+    # сквады не возвращаются». Уже-обработанные (expire_disabled_squads непуст) отсекаются выше
+    # и ре-пушат текущее состояние как раньше; ветка B (free-окно) имеет end_date в прошлом —
+    # гард её не трогает.
+    end_date = getattr(subscription, 'end_date', None)
+    if end_date is not None and _aware(end_date) > datetime.now(UTC):
+        return False
     return bool(subscription.connected_squads)
 
 

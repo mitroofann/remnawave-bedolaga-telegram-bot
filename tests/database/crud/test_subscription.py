@@ -431,3 +431,70 @@ def test_subscription_property_ignores_pending_trial_draft():
     assert _user(active, pending_trial).subscription is active
     # истёкшая подписка (для продления) показывается, черновик триала — нет
     assert _user(pending_trial, expired).subscription is expired
+
+
+async def test_replace_subscription_clears_expire_squad_markers(monkeypatch):
+    """[Форк] Замена истёкшей подписки (лендинги/webapi/купоны) = новая активация:
+    должна вернуть сквады, отложенные при истечении (ветки A/B), и очистить маркеры
+    фичи (expire_disabled_squads/expire_free_until) — как extend_subscription.
+    Без этого после продления через replace маркеры остаются непустыми: следующий
+    update с sync_squads=True смержил бы старые сквады, а гарды free-окна считали бы
+    free-доступ действующим.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from app.database.crud.subscription import replace_subscription
+
+    monkeypatch.setattr('app.database.crud.subscription._lock_subscription_row', AsyncMock())
+    monkeypatch.setattr('app.database.crud.subscription.clear_notifications', AsyncMock())
+    monkeypatch.setattr('app.database.crud.server_squad.get_server_ids_by_uuids', AsyncMock(return_value=[]))
+    monkeypatch.setattr('app.database.crud.server_squad.update_server_user_counts', AsyncMock())
+
+    db = AsyncMock()
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+
+    now = datetime.now(UTC)
+    sub = SimpleNamespace(
+        id=1,
+        user_id=7,
+        status='expired',
+        is_trial=False,
+        start_date=now - timedelta(days=40),
+        end_date=now - timedelta(days=10),
+        tariff_id=1,
+        traffic_limit_gb=100,
+        traffic_used_gb=0.0,
+        device_limit=5,
+        connected_squads=[],
+        expire_disabled_squads=['sq-eu', 'sq-lte'],
+        expire_free_until=now + timedelta(days=5),  # остаток free-окна (ветка B)
+        traffic_limit_disabled_squads=[],
+        purchased_traffic_gb=0,
+        traffic_reset_at=None,
+        subscription_url=None,
+        subscription_crypto_link=None,
+        remnawave_short_uuid=None,
+        autopay_enabled=None,
+        autopay_days_before=None,
+        updated_at=now,
+    )
+
+    await replace_subscription(
+        db,
+        sub,
+        duration_days=30,
+        traffic_limit_gb=100,
+        device_limit=5,
+        connected_squads=['sq-eu'],
+        is_trial=False,
+        update_server_counters=True,
+    )
+
+    assert sub.status == 'active'
+    assert sub.end_date > now
+    # сквады тарифа + отложенные при истечении вернулись, маркеры очищены
+    assert sub.connected_squads == ['sq-eu', 'sq-lte']
+    assert sub.expire_disabled_squads == []
+    assert sub.expire_free_until is None
+    db.commit.assert_awaited_once()

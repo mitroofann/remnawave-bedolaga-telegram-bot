@@ -213,6 +213,9 @@ async def test_user_modified_active_future_does_not_trigger_expire_squads():
     sub.id = 42
     sub.status = 'active'
     sub.end_date = datetime.now(UTC) + timedelta(days=10)
+    # [Форк] явные маркеры фичи: живая подписка без отложенных сквадов и free-окна
+    sub.expire_disabled_squads = []
+    sub.expire_free_until = None
 
     with patch(
         'app.services.remnawave_webhook_service.get_open_grace_subscription_ids',

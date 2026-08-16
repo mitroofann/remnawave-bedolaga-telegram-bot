@@ -778,6 +778,19 @@ async def replace_subscription(
     subscription.autopay_days_before = new_autopay_days_before
     subscription.updated_at = current_time
 
+    # [Форк] Замена подписки = новая активация (покупка/продление истёкшей подписки через
+    # лендинги, webapi, купоны): вернуть сквады, отложенные при истечении (expire_squad_service,
+    # ветки A/B) и по лимиту трафика, и очистить free-окно. Маркеры должны жить ровно пока
+    # подписка «погашена» фичей; без очистки expire_disabled_squads/expire_free_until остались бы
+    # непустыми после оплаты — следующий update с sync_squads=True смержил бы старые сквады,
+    # а гарды free-окна считали бы free-доступ действующим. Аналогично extend_subscription
+    # (days > 0). Поля мутируем без panel I/O — вызывающий ниже пушит полный connected_squads
+    # через create_/update_remnawave_user.
+    from app.services import expire_squad_service, traffic_limit_squad_service
+
+    traffic_limit_squad_service.apply_restore_fields(subscription)
+    expire_squad_service.apply_restore_fields(subscription)
+
     if commit:
         await db.commit()
         await db.refresh(subscription)
