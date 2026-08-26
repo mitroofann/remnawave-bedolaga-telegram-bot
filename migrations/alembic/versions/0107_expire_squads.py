@@ -21,7 +21,7 @@ from alembic import op
 
 
 revision = '0107'
-down_revision = '0106'
+down_revision = '0106_traffic_limit_squads'
 branch_labels = None
 depends_on = None
 

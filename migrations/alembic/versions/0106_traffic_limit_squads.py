@@ -19,8 +19,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision = '0106'
-down_revision = '0105'
+revision = '0106_traffic_limit_squads'
+down_revision = '0105_repair_lava_subscriptions'
 branch_labels = None
 depends_on = None
 

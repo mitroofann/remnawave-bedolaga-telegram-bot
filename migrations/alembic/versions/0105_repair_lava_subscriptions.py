@@ -23,7 +23,7 @@ Revises: 0104_landing_trial
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0105'
+revision = '0105_repair_lava_subscriptions'
 down_revision = '0104_landing_trial'
 branch_labels = None
 depends_on = None
