@@ -10,7 +10,7 @@ from app.config import PERIOD_PRICES, settings
 from app.database.models import User
 from app.localization.loader import DEFAULT_LANGUAGE
 from app.localization.texts import get_texts
-from app.utils.miniapp_buttons import build_miniapp_or_callback_button
+from app.utils.miniapp_buttons import build_cabinet_url, build_miniapp_or_callback_button
 from app.utils.price_display import PriceInfo, format_price_button
 from app.utils.pricing_utils import (
     apply_percentage_discount,
@@ -999,7 +999,16 @@ def _build_custom_main_menu_keyboard(
         subscription_buttons.append(InlineKeyboardButton(text=texts.MENU_TRIAL, callback_data='menu_trial'))
 
     if show_buy:
-        subscription_buttons.append(InlineKeyboardButton(text=texts.MENU_BUY_SUBSCRIPTION, callback_data='menu_buy'))
+        # Форк: кнопка «Купить подписку» в бот-режиме (у не-покупателя) открывает
+        # миниапп-кабинет на странице /subscriptions/. Если MINIAPP_CUSTOM_URL не
+        # задан — фолбэк на обычный callback menu_buy. Остальные кнопки меню не меняем.
+        buy_url = build_cabinet_url('/subscriptions/')
+        if buy_url:
+            subscription_buttons.append(
+                InlineKeyboardButton(text=texts.MENU_BUY_SUBSCRIPTION, web_app=types.WebAppInfo(url=buy_url))
+            )
+        else:
+            subscription_buttons.append(InlineKeyboardButton(text=texts.MENU_BUY_SUBSCRIPTION, callback_data='menu_buy'))
 
     if subscription_buttons:
         paired_buttons.extend(subscription_buttons)
