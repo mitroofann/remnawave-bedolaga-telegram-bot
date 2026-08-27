@@ -130,7 +130,10 @@ def should_handle_on_expiry(subscription: Subscription) -> bool:
     end_date = getattr(subscription, 'end_date', None)
     if end_date is not None and _aware(end_date) > datetime.now(UTC):
         return False
-    return bool(subscription.connected_squads)
+    # [Форк-хардн] getattr с дефолтом: предикат зовётся из _check_expired_subscriptions,
+    # куда тесты (и сторонние объекты) могут передать подписку без полей (напр. голый
+    # SimpleNamespace без connected_squads) — не падаем, считаем «снимать нечего».
+    return bool(getattr(subscription, 'connected_squads', None))
 
 
 async def handle_expiration(db: AsyncSession, user, subscription: Subscription) -> bool:
@@ -146,6 +149,17 @@ async def handle_expiration(db: AsyncSession, user, subscription: Subscription) 
 
     panel_user_id = _resolve_panel_user_id(subscription, user)
     now = datetime.now(UTC)
+
+    # [Форк-фикс] Подписка всё ещё оплачена (end_date в будущем) — это НЕ истечение:
+    # free-окно/снятие сквадов ей не положено. Защита от «хвоста»: до фикса free-окно
+    # могло быть выдано живой подписке (панель получала будущий expireAт, а значит срок
+    # подписки «подменялся»), а при завершении окна доступ отрубался, хотя человек
+    # оплатил до конца. Патч-утечки: data-driven вызовы (вебхук/сканер) передают
+    # правильную «истёкшую» подписку — их это не задевает.
+    end_date = getattr(subscription, 'end_date', None)
+    if end_date is not None and _aware(end_date) > now:
+        return False
+
     free_squads = resolve_free_squads(subscription)
 
     # Идемпотентность: фича уже активна для подписки — просто перепушиваем текущее состояние.
@@ -169,7 +183,7 @@ async def handle_expiration(db: AsyncSession, user, subscription: Subscription) 
                 )
         return True
 
-    original = list(subscription.connected_squads or [])
+    original = list(getattr(subscription, 'connected_squads', None) or [])
     if not original and not free_squads:
         # Сквадов нет и выдавать нечего — фича не применима, пусть штатный путь отработает.
         return False
@@ -236,10 +250,17 @@ async def handle_expiration(db: AsyncSession, user, subscription: Subscription) 
 
 
 async def finalize_expired(db: AsyncSession, subscription: Subscription) -> bool:
-    """Завершить free-окно (ветка B): снять free-сквад, перевести в EXPIRED.
+    """Завершить free-окно (ветка B): снять free-сквад и вернуть платный доступ.
 
-    Вызывается когда ``expire_free_until <= now``. ``expire_disabled_squads`` сохраняется
-    (для восстановления при продлении). Идемпотентна: если free-окна нет — тихо False.
+    Вызывается когда ``expire_free_until <= now``. Два исхода:
+    - подписка ещё ОПЛАЧЕНА (``end_date`` в будущем) — free-окно было лишь бесплатным
+      «хвостом» перед возвращением на платные сервера: восстанавливаем реальные сквады,
+      поднимаем статус ACTIVE, чистим маркеры. Доступ НЕ отрубаем — человек заплатил.
+    - подписка действительно истекла (``end_date`` в прошлом/нет) — снимаем free-сквад,
+      переводим в EXPIRED; ``expire_disabled_squads`` сохраняется для восстановления
+      при будущем продлении.
+
+    Идемпотентна: если free-окна нет — тихо False.
     """
     if not has_expire_disabled_squads(subscription):
         return False
@@ -250,6 +271,49 @@ async def finalize_expired(db: AsyncSession, subscription: Subscription) -> bool
 
     user = await get_user_by_id(db, subscription.user_id)
     panel_user_id = _resolve_panel_user_id(subscription, user) if user else None
+    end_date = getattr(subscription, 'end_date', None)
+
+    # [Форк-фикс] Восстанавливаем платный доступ только когда free-окно ДЕЙСТВИТЕЛЬНО
+    # завершилось (expire_free_until в прошлом) — вызывающая выборка и сама функция
+    # работают на этой посылке. Если окно ещё активно (expire_free_until в будущем), а
+    # end_date уже жив (внешнее продление мимо бота в активном окне) — это «спящее»
+    # воскрешение: ничего не делаем, откладываем до реального завершения окна. Без гарда
+    # сработал бы now-переход (restore → ACTIVE, очистка сквадов), панель увидела бы
+    # конфликтующий expireAt (будущий срок окна) и выбила бы юзера в EXPIRED — потеря
+    # доступа при живом end_date.
+    if user and is_free_window_active(subscription, now=datetime.now(UTC)):
+        return False
+
+    still_paid = end_date is not None and _aware(end_date) > datetime.now(UTC)
+
+    if still_paid:
+        # Подписка оплачена вперёд: возвращаем реальные сквады и поднимаем активный статус.
+        # Держим маркеры — их чистит восстановление (как в _push_restore_to_panel штатного
+        # продления). Здесь тоже восстанавливаем через штатный update (status/expire по end_date).
+        apply_restore_fields(subscription)
+        subscription.status = SubscriptionStatus.ACTIVE.value
+
+        # [Форк-фикс] free-сквад тарифа при восстановлении надо УБРАТЬ из connected, иначе он
+        # залипнет рядом с реальными (панель будет видеть и платный, и free-сквады). Это же
+        # вычитание делает apply_restore_fields при штатном продлении; здесь тариф ещё задан,
+        # поэтому убираем временно (apply_restore_fields уже не вычтет — маркеры чисты).
+        tariff_free = set(_tariff_free_squads(subscription))
+        connected_restored = [uuid for uuid in (subscription.connected_squads or []) if uuid not in tariff_free]
+        subscription.connected_squads = connected_restored
+
+        await db.commit()
+        await db.refresh(subscription)
+
+        ok = await _push_restore_to_panel(db, subscription)
+        logger.info(
+            'expire-squad: free-окно завершено, подписка ещё оплачена — доступ восстановлен',
+            subscription_id=subscription.id,
+            user_id=subscription.user_id,
+            end_date=_aware(end_date).isoformat(),
+            restored_squads=subscription.connected_squads,
+            panel_ok=ok,
+        )
+        return True
 
     subscription.connected_squads = []
     subscription.expire_free_until = None

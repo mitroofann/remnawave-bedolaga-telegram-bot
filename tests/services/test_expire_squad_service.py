@@ -181,6 +181,33 @@ async def test_handle_expiration_branch_b_gives_free_squad(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_handle_expiration_skips_when_still_paid(monkeypatch):
+    """Регрессия: free-окно/снятие сквадов не должно срабатывать на ЖИВОЙ подписке
+    (end_date в будущем). Раньше handle_expiration не проверял срок и мог выдать free-окно
+    платной подписке, а по завершении окна человек терял доступ, хотя оплатил вперёд."""
+    monkeypatch.setattr(svc, 'is_enabled', lambda: True)
+    monkeypatch.setattr(svc, '_resolve_panel_user_id', lambda sub, user: 12345)
+    push = AsyncMock()
+    monkeypatch.setattr(svc, '_push_to_panel', push)
+
+    now = datetime(2026, 7, 15, tzinfo=UTC)
+    # end_date в будущем (подписка оплачена), тариф с free-полями.
+    sub = _make_subscription(
+        end_date=now + timedelta(days=30),
+        tariff=SimpleNamespace(expire_free_squads=['sq-free'], expire_free_days=7),
+    )
+    with patch('app.services.expire_squad_service.datetime') as mock_dt:
+        mock_dt.now.return_value = now
+        handled = await svc.handle_expiration(_fake_db(), SimpleNamespace(remnawave_id=12345), sub)
+
+    assert handled is False
+    assert sub.connected_squads == ['sq-eu', 'sq-lte']  # не тронуты
+    assert sub.expire_disabled_squads == []  # маркеры не выставлены
+    assert sub.expire_free_until is None
+    push.assert_not_awaited()
+
+
+@pytest.mark.anyio
 async def test_handle_expiration_disabled_by_flag(monkeypatch):
     monkeypatch.setattr(svc, 'is_enabled', lambda: False)
     sub = _make_subscription()
@@ -261,6 +288,81 @@ async def test_finalize_expired_clears_free_squad(monkeypatch):
     assert sub.expire_disabled_squads == ['sq-eu']
     push.assert_awaited_once()
     assert push.await_args.kwargs['active_squads'] == []
+
+
+@pytest.mark.anyio
+async def test_finalize_expired_restores_when_still_paid(monkeypatch):
+    """Регрессия: free-окно закончилось, а подписка ещё оплачена (end_date в будущем) —
+    доступ НЕ отрубаем, а восстанавливаем реальные сквады и статус ACTIVE.
+    Раньше finalize_expired снимал всё и ставил EXPIRED → платный юзер терял доступ."""
+    monkeypatch.setattr(svc, '_resolve_panel_user_id', lambda sub, user: 12345)
+
+    now = datetime(2026, 7, 15, tzinfo=UTC)
+    # free-окно уже прошло (expire_free_until в прошлом), но end_date ещё в будущем.
+    # Тариф задаёт free-сквад — именно он сейчас лежит в connected (выданный бесплатный).
+    sub = _make_subscription(
+        connected_squads=['sq-free'],
+        expire_disabled_squads=['sq-eu', 'sq-lte'],
+        expire_free_until=now - timedelta(days=1),
+        end_date=now + timedelta(days=30),
+        tariff=SimpleNamespace(expire_free_squads=['sq-free'], expire_free_days=7),
+    )
+
+    restore_push = AsyncMock(return_value=True)
+    monkeypatch.setattr(svc, '_push_restore_to_panel', restore_push)
+
+    db = _fake_db()
+    with (
+        patch('app.services.expire_squad_service.datetime') as mock_dt,
+        patch('app.database.crud.user.get_user_by_id', AsyncMock(return_value=SimpleNamespace(remnawave_id=12345))),
+    ):
+        mock_dt.now.return_value = now  # фиксируем «сейчас» — иначе реальный now перекрывает end_date
+        done = await svc.finalize_expired(db, sub)
+
+    assert done is True
+    # Реальные сквады вернулись, маркеры очищены, статус ACTIVE.
+    assert sub.connected_squads == ['sq-eu', 'sq-lte']
+    assert sub.expire_disabled_squads == []
+    assert sub.expire_free_until is None
+    assert sub.status == 'active'
+    restore_push.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_finalize_expired_defers_when_window_still_active(monkeypatch):
+    """Регрессия: окно ещё АКТИВНО (expire_free_until в будущем), а end_date уже жив
+    (внешнее продление мимо бота) — доступ НЕ трогаем и маркеры НЕ чистим.
+    Раньше finalize_expired не проверял активность окна и сделал бы now-переход
+    (restore → ACTIVE, очистка сквадов) → панель увидела бы конфликтующий expireAt
+    и выбила бы юзера в EXPIRED при живом end_date."""
+    monkeypatch.setattr(svc, '_resolve_panel_user_id', lambda sub, user: 12345)
+    restore_push = AsyncMock(return_value=True)
+    monkeypatch.setattr(svc, '_push_restore_to_panel', restore_push)
+
+    now = datetime(2026, 7, 15, tzinfo=UTC)
+    sub = _make_subscription(
+        connected_squads=['sq-free'],
+        expire_disabled_squads=['sq-eu', 'sq-lte'],
+        expire_free_until=now + timedelta(days=5),  # окно ещё активно
+        end_date=now + timedelta(days=30),  # но подписка внешне продлена
+        tariff=SimpleNamespace(expire_free_squads=['sq-free'], expire_free_days=7),
+    )
+
+    db = _fake_db()
+    with (
+        patch('app.services.expire_squad_service.datetime') as mock_dt,
+        patch('app.database.crud.user.get_user_by_id', AsyncMock(return_value=SimpleNamespace(remnawave_id=12345))),
+    ):
+        mock_dt.now.return_value = now
+        done = await svc.finalize_expired(db, sub)
+
+    # Отложено: маркеры и сквады не тронуты, статус не перезаписан.
+    assert done is False
+    assert sub.connected_squads == ['sq-free']
+    assert sub.expire_disabled_squads == ['sq-eu', 'sq-lte']
+    assert sub.expire_free_until is not None
+    assert sub.status == 'active'
+    restore_push.assert_not_awaited()
 
 
 @pytest.mark.anyio
