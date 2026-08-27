@@ -1008,7 +1008,9 @@ def _build_custom_main_menu_keyboard(
                 InlineKeyboardButton(text=texts.MENU_BUY_SUBSCRIPTION, web_app=types.WebAppInfo(url=buy_url))
             )
         else:
-            subscription_buttons.append(InlineKeyboardButton(text=texts.MENU_BUY_SUBSCRIPTION, callback_data='menu_buy'))
+            subscription_buttons.append(
+                InlineKeyboardButton(text=texts.MENU_BUY_SUBSCRIPTION, callback_data='menu_buy')
+            )
 
     if subscription_buttons:
         paired_buttons.extend(subscription_buttons)
