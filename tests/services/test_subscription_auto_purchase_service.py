@@ -988,6 +988,141 @@ async def test_auto_purchase_trial_preserved_on_extension_failure(monkeypatch):
     refund_mock.assert_awaited()  # КОМПЕНСИРУЮЩИЙ ВОЗВРАТ СРЕДСТВ ВЫПОЛНЕН!
 
 
+async def test_auto_purchase_pending_activated_after_successful_extension(monkeypatch):
+    """[Форк] Баг «покупка из pending → подписка отключена» (2026-08-27, суб 3596).
+
+    PENDING-подписка оплачена из корзины (extend_subscription уже продлил end_date),
+    но статус оставался pending → update_remnawave_user() пушил панели DISABLED.
+    После фикса оплаченная pending-подписка обязана активироваться (active)."""
+    monkeypatch.setattr(settings, 'AUTO_PURCHASE_AFTER_TOPUP_ENABLED', True)
+    # Классический режим: не влияет на pending-ветку (tariffs-гард не задействован)
+    monkeypatch.setattr(settings, 'SALES_MODE', 'classic')
+
+    subscription = MagicMock()
+    subscription.id = 9911
+    subscription.is_trial = False  # НЕ триал! Это pending-подписка после просрочки оплаты
+    subscription.status = 'pending'
+    subscription.end_date = datetime.now(UTC) + timedelta(days=1)  # будущий end_date; extend прибавит +30
+    subscription.updated_at = None  # обходим 60-секундный race-guard
+    subscription.tariff_id = None
+    subscription.device_limit = 1
+    subscription.traffic_limit_gb = 10
+    subscription.connected_squads = []
+
+    user = MagicMock(spec=User)
+    user.id = 88
+    user.telegram_id = 8888
+    user.balance_kopeks = 200_000  # Достаточно денег
+    user.language = 'ru'
+    user.subscription = subscription
+    user.get_primary_promo_group = MagicMock(return_value=None)
+    user.promo_offer_discount_percent = 0
+    user.promo_offer_discount_source = None
+    user.promo_offer_discount_expires_at = None
+
+    cart_data = {
+        'cart_mode': 'extend',
+        'subscription_id': subscription.id,
+        'period_days': 30,
+        'total_price': 100_000,
+        'description': 'Продление на 30 дней',
+        'device_limit': 1,
+        'traffic_limit_gb': 100,
+        'squad_uuid': None,
+        'consume_promo_offer': False,
+    }
+
+    # Mock: деньги списались успешно
+    subtract_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        'app.services.subscription_auto_purchase_service.subtract_user_balance',
+        subtract_mock,
+    )
+
+    # Mock: продление успешно (не трогает статус — реальный extend_subscription
+    # тоже активирует pending, но тут модель повторяет «старый» дефективный сценарий,
+    # чтобы проверить нашу страховку в auto-purchase)
+    async def extend_stub(db, current_subscription, days, **kwargs):
+        current_subscription.end_date = current_subscription.end_date + timedelta(days=days)
+        # НЕ меняем статус — имитируем старый дефективный extend (статус оставался pending)
+        return current_subscription
+
+    monkeypatch.setattr(
+        'app.services.subscription_auto_purchase_service.extend_subscription',
+        extend_stub,
+    )
+
+    monkeypatch.setattr(
+        'app.services.subscription_auto_purchase_service.user_cart_service.get_user_cart',
+        AsyncMock(return_value=cart_data),
+    )
+
+    monkeypatch.setattr(
+        'app.services.subscription_auto_purchase_service.get_texts',
+        lambda lang: DummyTexts(),
+    )
+    monkeypatch.setattr(
+        'app.services.subscription_auto_purchase_service.format_period_description',
+        lambda days, lang: f'{days} дней',
+    )
+    monkeypatch.setattr(
+        'app.services.subscription_auto_purchase_service.format_local_datetime',
+        lambda dt, fmt: dt.strftime(fmt) if dt else '',
+    )
+    monkeypatch.setattr(
+        'app.services.subscription_auto_purchase_service.create_transaction',
+        AsyncMock(return_value=MagicMock()),
+    )
+
+    admin_service_mock = MagicMock()
+    admin_service_mock.send_subscription_extension_notification = AsyncMock()
+    monkeypatch.setattr(
+        'app.services.subscription_auto_purchase_service.AdminNotificationService',
+        lambda bot: admin_service_mock,
+    )
+
+    # Мок для get_subscription_by_user_id
+    monkeypatch.setattr(
+        'app.database.crud.subscription.get_subscription_by_user_id',
+        AsyncMock(return_value=subscription),
+    )
+    # Подписка ищется по id для гардов DISABLED/race и для контекста продления
+    monkeypatch.setattr(
+        'app.database.crud.subscription.get_subscription_by_id_for_user',
+        AsyncMock(return_value=subscription),
+    )
+    # Лочим пользователя перед свежим расчётом цены
+    monkeypatch.setattr(
+        'app.database.crud.user.lock_user_for_pricing',
+        AsyncMock(return_value=user),
+    )
+    # Свежий расчёт цены: 100_000 <= баланс 200_000 и > 0
+    fresh_pricing = MagicMock()
+    fresh_pricing.final_total = 100_000
+    fresh_pricing.original_total = 100_000
+    monkeypatch.setattr(
+        'app.services.pricing_engine.pricing_engine.calculate_renewal_price',
+        AsyncMock(return_value=fresh_pricing),
+    )
+    # Избегаем фейкового Redis при сканировании per-subscription корзин
+    monkeypatch.setattr(
+        'app.services.subscription_auto_purchase_service.user_cart_service.get_all_subscription_carts',
+        AsyncMock(return_value=[]),
+    )
+
+    db_session = AsyncMock(spec=AsyncSession)
+    db_session.commit = AsyncMock()  # Важно! Отслеживаем commit
+    db_session.refresh = AsyncMock()
+    bot = AsyncMock()
+
+    result = await auto_purchase_saved_cart_after_topup(db_session, user, bot=bot)
+
+    # Проверки: PENDING-подписка ОБЯЗАНА активироваться после оплаченного продления
+    assert result is True
+    assert subscription.status == 'active'  # главный фикс — статус больше не pending!
+    assert subscription.is_trial is False
+
+
 async def test_auto_purchase_trial_remaining_days_transferred(monkeypatch):
     """Тест: остаток триала переносится на платную подписку при TRIAL_ADD_REMAINING_DAYS_TO_PAID=True"""
     monkeypatch.setattr(settings, 'AUTO_PURCHASE_AFTER_TOPUP_ENABLED', True)

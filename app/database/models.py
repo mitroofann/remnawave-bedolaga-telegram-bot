@@ -2556,6 +2556,13 @@ class Subscription(Base):
         if self.status in (SubscriptionStatus.EXPIRED.value, SubscriptionStatus.LIMITED.value):
             self.status = SubscriptionStatus.ACTIVE.value
 
+        # [Форк] Оплаченная PENDING-подписка (деньги уже списаны, end_date в будущем):
+        # активируем наравне с EXPIRED/LIMITED — иначе push в RemnaWave сам поставил бы
+        # DISABLED (баг «покупка из pending → подписка отключена», 2026-08-27).
+        # Пути модели (lava/platega) не используют crud-версию.
+        elif self.status == SubscriptionStatus.PENDING.value:
+            self.status = SubscriptionStatus.ACTIVE.value
+
     def add_traffic(self, gb: int):
         if self.traffic_limit_gb == 0:
             return

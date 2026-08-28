@@ -1218,7 +1218,19 @@ async def extend_subscription(
         subscription.status = SubscriptionStatus.ACTIVE.value
         logger.info('🔄 Статус подписки изменён с trial на ACTIVE', subscription_id=subscription.id)
     elif days > 0 and subscription.status == SubscriptionStatus.PENDING.value:
-        logger.warning('⚠️ Попытка продлить PENDING подписку , дни', subscription_id=subscription.id, days=days)
+        # [Форк] Продление оплаченной PENDING-подписки (автопокупка из корзины и т.п.).
+        # Раньше PENDING оставался PENDING: экстенд уже был вызван ПОСЛЕ списания средств
+        # (и end_date уже продлён в будущее), но статус не менялся → последующий push
+        # в RemnaWave считал подписку неактивной и сам отправлял панели DISABLED
+        # (баг «покупка из pending → подписка отключена», user 8923/sub 3596, 2026-08-27).
+        # Активируем наравне с EXPIRED/DISABLED/LIMITED/TRIAL.
+        previous_status = subscription.status
+        subscription.status = SubscriptionStatus.ACTIVE.value
+        logger.info(
+            '🔄 Статус подписки изменён с PENDING на ACTIVE (оплаченное продление)',
+            subscription_id=subscription.id,
+            previous_status=previous_status,
+        )
 
     # Обновляем параметры тарифа, если переданы
     if tariff_id is not None:

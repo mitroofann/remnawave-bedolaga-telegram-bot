@@ -596,6 +596,25 @@ async def _auto_extend_subscription(
                 format_user_id=_format_user_id(user),
             )
 
+        # [Форк] PENDING-подписка оплачена (деньги списаны выше, extend_subscription
+        # продлил end_date в будущее) — активируем её. Иначе следующий push
+        # update_remnawave_user() сам отправил бы панели DISABLED, потому что для
+        # статуса pending is_actually_active=False (баг «покупка из pending →
+        # подписка отключена», user 8923/sub 3596, 2026-08-27). extend_subscription
+        # тоже активирует pending, но тут страхуемся от любых путей, где до него
+        # статус ещё мог остаться pending (страховка идемпотентна).
+        elif subscription.status == SubscriptionStatus.PENDING.value:
+            previous_status = subscription.status
+            subscription.status = SubscriptionStatus.ACTIVE.value
+            subscription.is_trial = False
+            await db.commit()
+            logger.info(
+                '🔄 Автопокупка: оплаченная PENDING-подписка активирована',
+                subscription_id=subscription.id,
+                format_user_id=_format_user_id(user),
+                previous_status=previous_status,
+            )
+
     except Exception as error:  # pragma: no cover - defensive logging
         logger.error(
             '❌ Автопокупка: не удалось продлить подписку пользователя',

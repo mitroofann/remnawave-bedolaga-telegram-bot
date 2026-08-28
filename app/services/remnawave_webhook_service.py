@@ -1144,6 +1144,30 @@ class RemnaWaveWebhookService:
         """Mark subscription as recently updated by webhook to prevent sync overwrite."""
         subscription.last_webhook_update_at = datetime.now(UTC)
 
+    @staticmethod
+    def _disabled_since(subscription: Subscription) -> datetime | None:
+        """[Форк] Момент перехода подписки в DISABLED (для stale-гарда панельного DISABLED).
+
+        Честный DISABLED оставляет зримый след в данных: end_date в прошлом (истекла), либо
+        подписка уже локально DISABLED (обнуление/лимит трафика/ручное отключение). Если следов
+        НЕТ, а подписка ЛОКАЛЬНО активна (active/trial) с будущим end_date — это, скорее всего,
+        эхо нашего же ошибочного пуша (баг «покупка из pending → подписка отключена», 2026-08-27).
+        Возвращаем время, с которого подписка числится отключенной (для окна-страховки), либо
+        None — подписка активна и панельный DISABLED не должен применяться.
+        """
+        now = datetime.now(UTC)
+        end_date = getattr(subscription, 'end_date', None)
+        status = getattr(subscription, 'status', None)
+        if (
+            status in (SubscriptionStatus.ACTIVE.value, SubscriptionStatus.TRIAL.value)
+            and end_date is not None
+            and end_date > now
+        ):
+            # Локально активна с будущим сроком — панельный DISABLED необоснован (echo).
+            return None
+        # end_date прошлый/нет или подписка уже локально DISABLED — отключение «честное».
+        return now
+
     def _stamp_expire_push(self, subscription_id: int) -> None:
         """[Форк] Отметить, что МЫ сами только что запушили expire-состояние на панель.
 
@@ -1533,6 +1557,32 @@ class RemnaWaveWebhookService:
                 end_date=subscription.end_date,
             )
 
+        # [Форк] Зеркальный гард для DISABLED. Панельный статус DISABLED не всегда
+        # результат честного отключения: бот сам мог пушить DISABLED для подписки,
+        # которая ЛОКАЛЬНО активна с будущим end_date (баг «покупка из pending →
+        # подписка отключена», 2026-08-27: update_remnawave_user для pending слал
+        # панели DISABLED, панель применяла и эхом присылала user.modified →
+        # хендлер молча затирал БД-local active). «Классической» DISABLED (обнуление
+        # админом / лимит трафика / ручное отключение) это не мешает: контекст такой
+        # подписки остаётся DISABLED (can_admin_disable=True), и очередной честный
+        # user.modified всё равно применится. Здесь гардим только НЕОБОСНОВАННЫЙ
+        # панельный DISABLED на фоне локально-активной подписки.
+        # is_hard_disabled: подписка по-настоящему отключена (не активна локально).
+        # Для активной (active/trial) с будущим end_date панельный DISABLED — echo-пуш:
+        # блокируем его применение (см. _disabled_since).
+        if data.get('status') == 'DISABLED' and subscription.status in (
+            SubscriptionStatus.ACTIVE.value,
+            SubscriptionStatus.TRIAL.value,
+        ):
+            if self._disabled_since(subscription) is None:
+                logger.warning(
+                    'Webhook: панельный DISABLED на фоне локально-активной подписки игнорирован '
+                    '(подписка активна, end_date в будущем; DISABLED — вероятное эхо нашего пуша)',
+                    subscription_id=subscription.id,
+                    user_id=user.id,
+                    end_date=subscription.end_date,
+                )
+
         # Sync traffic limit
         # [Форк] пока сквады погашены по лимиту трафика, панельный лимит искусственно поднят
         # (used+буфер) — не даём ему перезаписать тарифный traffic_limit_gb, иначе в боте
@@ -1699,9 +1749,27 @@ class RemnaWaveWebhookService:
                 if not free_window_active and expire_squad_service.has_expire_disabled_squads(subscription):
                     await expire_squad_service.restore_squads(db, subscription, reason='webhook_external_reactivation')
             elif panel_status == 'DISABLED':
-                if subscription.status != SubscriptionStatus.DISABLED.value:
+                # [Форк] Stale-гард: панельный DISABLED на фоне локально-активной
+                # подписки (active/trial + будущий end_date) — эхо нашего пуша, не
+                # применяем (сам статус-синк был в начале функции; здесь блокируем
+                # DISABLED через флаг, чтобы и остальные ветки _handle_user_modified
+                # не затирали локальный активный статус).
+                if self._disabled_since(subscription) is None:
+                    logger.info(
+                        'Webhook: панельный DISABLED проигнорирован (подписка активна в боте)',
+                        subscription_id=subscription.id,
+                        user_id=user.id,
+                        end_date=subscription.end_date,
+                    )
+                elif subscription.status != SubscriptionStatus.DISABLED.value:
                     subscription.status = SubscriptionStatus.DISABLED.value
                     changed = True
+                    logger.warning(
+                        'Webhook: подписка переведена в DISABLED по панели (status=DISABLED)',
+                        subscription_id=subscription.id,
+                        user_id=user.id,
+                        end_date=subscription.end_date,
+                    )
 
         # Sync subscription URL (validate to prevent stored XSS)
         subscription_url = data.get('subscriptionUrl')
