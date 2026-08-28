@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import structlog
 from sqlalchemy import and_, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -29,54 +29,60 @@ async def create_yookassa_payment(
     # Идемпотентно по yookassa_payment_id. Рекуррентный автоплатёж использует
     # детерминированный ключ идемпотентности на (подписку, карту, день), поэтому
     # повторные запуски в тот же день получают от YooKassa ТОТ ЖЕ payment_id.
-    # Повторная вставка била по unique-индексу и (ошибочно) логировалась как
-    # «FK violation user_id», заваливая админ-чат. Если запись уже есть — вернём её.
+    #
+    # [Форк] Вставка переведена на атомарный INSERT ... ON CONFLICT DO NOTHING:
+    # раньше тут был read-then-insert (SELECT → INSERT), из-за чего два
+    # одновременных вебхука одного пользователя могли оба пройти проверку и оба
+    # попытаться вставить одну строку — FK-триггер у yookassa_payments.user_id
+    # тянул FOR KEY SHARE лок на строку users, а дальше UPDATE users (баланс)
+    # требовал RowExclusiveLock, и получался deadlock между двумя обработками.
+    # ON CONFLICT делает идемпотентность атомарной: либо вставили, либо уже была.
+    # ON CONFLICT ... RETURNING отдаёт целую ORM-запись YooKassaPayment, если
+    # вставка реально произошла, и пустой Row/NULL — если конфликт (уже была).
+    insert_stmt = (
+        pg_insert(YooKassaPayment)
+        .values(
+            user_id=user_id,
+            yookassa_payment_id=yookassa_payment_id,
+            amount_kopeks=amount_kopeks,
+            currency=currency,
+            description=description,
+            status=status,
+            confirmation_url=confirmation_url,
+            metadata_json=metadata_json,
+            payment_method_type=payment_method_type,
+            yookassa_created_at=yookassa_created_at,
+            test_mode=test_mode,
+        )
+        .on_conflict_do_nothing(index_elements=[YooKassaPayment.yookassa_payment_id])
+        .returning(YooKassaPayment)
+    )
+
+    payment = (await db.execute(insert_stmt)).scalar_one_or_none()
+    await db.commit()
+
+    if payment is not None:
+        logger.info(
+            'Создан платеж YooKassa',
+            yookassa_payment_id=yookassa_payment_id,
+            amount_rubles=amount_kopeks / 100,
+            user_id=user_id,
+        )
+        return payment
+
+    # Конфликт по yookassa_payment_id — возвращаем существующую запись. user_id
+    # в аргументах мог отличаться от записи (рекуррентный пробует карты), поэтому
+    # берём актуальную версию из БД.
     existing = await get_yookassa_payment_by_id(db, yookassa_payment_id)
     if existing is not None:
         return existing
 
-    payment = YooKassaPayment(
-        user_id=user_id,
+    logger.error(
+        'Не удалось создать или найти платеж YooKassa по payment_id',
         yookassa_payment_id=yookassa_payment_id,
-        amount_kopeks=amount_kopeks,
-        currency=currency,
-        description=description,
-        status=status,
-        confirmation_url=confirmation_url,
-        metadata_json=metadata_json,
-        payment_method_type=payment_method_type,
-        yookassa_created_at=yookassa_created_at,
-        test_mode=test_mode,
-    )
-
-    db.add(payment)
-    try:
-        await db.commit()
-    except IntegrityError as e:
-        await db.rollback()
-        # Проиграли гонку вставки по тому же yookassa_payment_id — это успех
-        # (идемпотентность): вернём запись, которую успел создать конкурент.
-        existing = await get_yookassa_payment_by_id(db, yookassa_payment_id)
-        if existing is not None:
-            return existing
-        # Иначе это настоящая проблема целостности (например, FK по user_id) —
-        # вот её и логируем как ERROR, с корректным текстом.
-        logger.error(
-            'IntegrityError при создании платежа YooKassa (не дубликат payment_id)',
-            yookassa_payment_id=yookassa_payment_id,
-            user_id=user_id,
-            error=str(e),
-        )
-        return None
-    await db.refresh(payment)
-
-    logger.info(
-        'Создан платеж YooKassa',
-        yookassa_payment_id=yookassa_payment_id,
-        amount_rubles=amount_kopeks / 100,
         user_id=user_id,
     )
-    return payment
+    return None
 
 
 async def get_yookassa_payment_by_id(db: AsyncSession, yookassa_payment_id: str) -> YooKassaPayment | None:

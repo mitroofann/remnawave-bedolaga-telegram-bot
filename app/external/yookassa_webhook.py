@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Union
 
 import structlog
 from aiohttp import web
+from sqlalchemy import text
 
 from app.config import settings
 from app.database.database import AsyncSessionLocal
@@ -71,6 +72,47 @@ YOOKASSA_ALLOWED_EVENTS: tuple[str, ...] = (
     'payment.waiting_for_capture',
     'payment.canceled',
 )
+
+# [Форк] Пространство и база для сериализации обработки YooKassa-вебхуков по
+# пользователю (см. handle_webhook). Вынесены как модульные константы, чтобы их
+# можно было единообразно переиспользовать из других обработчиков платежей.
+# База намеренно далеко от нуля: pg_advisory_xact_lock принимает int4 (2^31-1),
+# а user_id в базе — int8, поэтому ключ собирается как base+user_id, и для
+# реалистичных значений user_id (порядка миллиарда) переполнения не будет.
+POSTGRES_LOCK_NAMESPACE = 800_000
+_YOOKASSA_USER_LOCK_ID_BASE = 50_000_000_000
+
+
+def _extract_user_id_from_webhook(webhook_data: dict) -> int | None:
+    """Достаёт внутренний user_id из metadata платежа (без нормализации)."""
+    if not isinstance(webhook_data, dict):
+        return None
+    try:
+        metadata = webhook_data.get('object', {}).get('metadata') or {}
+    except AttributeError:
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    for key in ('user_id', 'userId', 'user_db_id'):
+        try:
+            raw = metadata.get(key)
+        except Exception:
+            continue
+        if raw is None:
+            continue
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return None
+
+
+# [Форк] Полный namespace для handle_webhook (тот же приём, что в
+# grace_access_runtime._acquire_database_lock) — безразмерный на читаемость.
+_POSTGRES_LOCK_NAMESPACE = POSTGRES_LOCK_NAMESPACE
+_POSTGRES_WEBHOOK_LOCK_ID_BASE = _YOOKASSA_USER_LOCK_ID_BASE
 
 
 def collect_yookassa_ip_candidates(*values: str | None) -> list[str]:
@@ -277,6 +319,25 @@ class YooKassaWebhookHandler:
 
             async with AsyncSessionLocal() as db:
                 try:
+                    # [Форк] Сериализация обработки платежей одного пользователя.
+                    # Два одновременных вебхука/автоплатёжа для одного user_id:
+                    # оба INSERT в yookassa_payments берут FOR KEY SHARE лок на
+                    # строку users (FK user_id→users), затем оба UPDATE users
+                    # (баланс) требуют RowExclusiveLock — получался deadlock.
+                    # xact-лок по user_id выстраивает такие обработки в очередь:
+                    # одному пользователю последовательно, разным — параллельно.
+                    # Лок сам снимается на commit/rollback (приём как в
+                    # grace_access_runtime._acquire_database_lock).
+                    target_user_id = _extract_user_id_from_webhook(webhook_data)
+                    if target_user_id is not None:
+                        await db.execute(
+                            text('SELECT pg_advisory_xact_lock(:namespace, :lock_id)'),
+                            {
+                                'namespace': _POSTGRES_LOCK_NAMESPACE,
+                                'lock_id': _POSTGRES_WEBHOOK_LOCK_ID_BASE + target_user_id,
+                            },
+                        )
+
                     # Проверяем, не обрабатывается ли этот платеж уже (защита от дублирования)
                     from app.database.crud.transaction import get_transaction_by_external_id
                     from app.database.models import PaymentMethod

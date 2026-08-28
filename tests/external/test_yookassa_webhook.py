@@ -8,6 +8,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from app.config import settings
 from app.external.yookassa_webhook import (
+    _extract_user_id_from_webhook,
     create_yookassa_webhook_app,
     resolve_yookassa_ip,
 )
@@ -118,13 +119,39 @@ def _patch_get_db(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_session = AsyncMock()
     mock_session.commit = AsyncMock()
     mock_session.rollback = AsyncMock()
-    mock_session.execute = AsyncMock()
+    # execute пропускает реальные SQLAlchemy-объекты (advisory-лок, SELECT и т.п.)
+    async def _execute(stmt):
+        if isinstance(stmt, str):
+            return MagicMock()
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=None)
+        return result
+
+    mock_session.execute = AsyncMock(side_effect=_execute)
 
     ctx = MagicMock()
     ctx.__aenter__ = AsyncMock(return_value=mock_session)
     ctx.__aexit__ = AsyncMock(return_value=False)
 
     monkeypatch.setattr('app.external.yookassa_webhook.AsyncSessionLocal', lambda: ctx)
+
+
+@pytest.mark.parametrize(
+    ('payload', 'expected_user_id'),
+    (
+        ({'object': {'metadata': {'user_id': '42'}}, 'event': 'payment.succeeded'}, 42),
+        ({'object': {'metadata': {'userId': '43'}}, 'event': 'payment.canceled'}, 43),
+        ({'object': {'metadata': {'user_db_id': '44'}}, 'event': 'payment.succeeded'}, 44),
+        ({'object': {'metadata': {'user_id': 45}}, 'event': 'payment.succeeded'}, 45),
+        ({'object': {'metadata': {'user_telegram_id': '46'}}, 'event': 'payment.succeeded'}, None),
+        ({'object': {'metadata': {}}, 'event': 'payment.succeeded'}, None),
+        ({'object': {}, 'event': 'payment.succeeded'}, None),
+        ({}, None),
+    ),
+)
+def test_extract_user_id_from_webhook(payload: dict, expected_user_id: int | None) -> None:
+    """Хелпер подбирает внутренний user_id для сериализации (или None — без лока)."""
+    assert _extract_user_id_from_webhook(payload) == expected_user_id
 
 
 @pytest.mark.asyncio
