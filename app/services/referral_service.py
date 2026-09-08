@@ -1042,73 +1042,26 @@ async def process_referral_topup(db: AsyncSession, user_id: int, topup_amount_ko
             has_made_first_topup=user.has_made_first_topup,
         )
         qualifies_for_first_bonus = topup_amount_kopeks >= settings.REFERRAL_MINIMUM_TOPUP_KOPEKS
+
+        # [Форк] Пополнения ниже минимума не приносят рефереру ничего: ни комиссии,
+        # ни расхода лимита комиссионных платежей (REFERRAL_MAX_COMMISSION_PAYMENTS).
+        # Ранее с таких пополнений комиссия начислялась, из-за чего лимит мог
+        # потратиться на «мелочь», а первое «настоящее» пополнение шло мимо лимита.
+        if not qualifies_for_first_bonus:
+            logger.info(
+                'Пополнение ниже минимума — комиссия и бонусы не начисляются',
+                user_id=user_id,
+                referrer_id=referrer.id,
+                topup_amount_kopeks=topup_amount_kopeks / 100,
+                minimum_topup_kopeks=settings.REFERRAL_MINIMUM_TOPUP_KOPEKS,
+            )
+            return True
+
         commission_amount = 0
         if commission_percent > 0:
             commission_amount = _cap_commission_amount(int(topup_amount_kopeks * commission_percent / 100))
 
         if not user.has_made_first_topup:
-            if not qualifies_for_first_bonus:
-                logger.info(
-                    'Пополнение на ₽ меньше минимума для первого бонуса, но комиссия будет начислена',
-                    user_id=user_id,
-                    topup_amount_kopeks=topup_amount_kopeks / 100,
-                )
-
-                if commission_amount > 0 and await _is_commission_limit_reached(db, referrer.id, user.id):
-                    return True
-
-                if commission_amount > 0:
-                    balance_ok = await add_user_balance(
-                        db,
-                        referrer,
-                        commission_amount,
-                        f'Комиссия {commission_percent}% с пополнения {user.full_name}',
-                        transaction_type=TransactionType.REFERRAL_REWARD,
-                        bot=bot,
-                    )
-
-                    if balance_ok:
-                        await create_referral_earning(
-                            db=db,
-                            user_id=referrer.id,
-                            referral_id=user.id,
-                            amount_kopeks=commission_amount,
-                            reason='referral_commission_topup',
-                            campaign_id=campaign_id,
-                        )
-
-                        logger.info(
-                            '💰 Комиссия с пополнения: получил ₽ (до первого бонуса)',
-                            telegram_id=referrer.telegram_id,
-                            commission_amount=commission_amount / 100,
-                        )
-
-                        if bot:
-                            commission_notification = (
-                                f'💰 <b>Реферальная комиссия!</b>\n\n'
-                                f'Ваш реферал <b>{html.escape(user.full_name)}</b> пополнил баланс на '
-                                f'{settings.format_price(topup_amount_kopeks)}\n\n'
-                                f'🎁 Ваша комиссия ({commission_percent}%): '
-                                f'{settings.format_price(commission_amount)}\n\n'
-                                f'💎 Средства зачислены на ваш баланс.'
-                            )
-                            await send_referral_notification(
-                                bot,
-                                referrer.telegram_id,
-                                commission_notification,
-                                user=referrer,
-                                bonus_kopeks=commission_amount,
-                                referral_name=user.full_name,
-                            )
-                    else:
-                        logger.error(
-                            'Не удалось начислить комиссию на баланс, ReferralEarning не создан',
-                            referrer_id=referrer.id,
-                            commission_amount=commission_amount,
-                        )
-
-                return True
-
             user.has_made_first_topup = True
             await db.commit()
 

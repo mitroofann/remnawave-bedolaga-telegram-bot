@@ -6,7 +6,7 @@
 осознанное изменение, а не как тихая финансовая регрессия.
 
 Разбор веток process_referral_topup:
-  A — реферал ещё не платил, сумма НИЖЕ порога: только комиссия рефереру;
+  A — сумма НИЖЕ порога: ничего не начисляется, лимит не расходуется [форк];
   B — первое пополнение ОТ порога: рефералу фикс-бонус, рефереру фикс + комиссия;
   C — все последующие пополнения: только комиссия.
 """
@@ -78,13 +78,12 @@ def wired(monkeypatch):
 
 
 class TestTopupBranches:
-    async def test_below_threshold_pays_commission_only(self, wired):
-        """Ветка A: порог не взят — фикс-бонусов нет, комиссия всё равно идёт."""
+    async def test_below_threshold_pays_nothing(self, wired):
+        """[Форк] Ветка A: порог не взят — никаких начислений, лимит не расходуется."""
         await referral_service.process_referral_topup(AsyncMock(), 2, 4000)
 
-        assert [c['amount'] for c in wired.balance_credits] == [1000]  # 25% от 4000
-        assert wired.balance_credits[0]['user_id'] == wired.referrer.id
-        assert [e['reason'] for e in wired.earnings] == ['referral_commission_topup']
+        assert wired.balance_credits == []
+        assert wired.earnings == []
         # Порог не взят — флаг первого пополнения не выставляется.
         assert wired.referral.has_made_first_topup is False
 

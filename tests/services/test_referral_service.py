@@ -83,7 +83,9 @@ async def test_disabled_referral_notifications_skip_email_delivery(monkeypatch):
     notify_referral_bonus.assert_not_awaited()
 
 
-async def test_commission_accrues_before_minimum_first_topup(monkeypatch):
+async def test_below_minimum_topup_accrues_nothing(monkeypatch):
+    """[Форк] Пополнение ниже REFERRAL_MINIMUM_TOPUP_KOPEKS не приносит рефереру
+    ни комиссии, ни расхода лимита: никаких начислений вообще."""
     user = SimpleNamespace(
         id=1,
         telegram_id=101,
@@ -112,11 +114,6 @@ async def test_commission_accrues_before_minimum_first_topup(monkeypatch):
     monkeypatch.setattr(referral_service, 'get_referral_reward_payment_count', AsyncMock(return_value=0))
 
     monkeypatch.setattr(referral_service.settings, 'REFERRAL_MINIMUM_TOPUP_KOPEKS', 20000)
-    monkeypatch.setattr(referral_service.settings, 'REFERRAL_FIRST_TOPUP_BONUS_KOPEKS', 5000)
-    monkeypatch.setattr(referral_service.settings, 'REFERRAL_INVITER_BONUS_KOPEKS', 10000)
-    monkeypatch.setattr(referral_service.settings, 'REFERRAL_COMMISSION_PERCENT', 25)
-    monkeypatch.setattr(referral_service.settings, 'REFERRAL_FIRST_PAYMENT_COMMISSION_PERCENT', None)
-    monkeypatch.setattr(referral_service.settings, 'REFERRAL_RECURRING_COMMISSION_TIERS', '')
 
     topup_amount = 15000
 
@@ -125,19 +122,8 @@ async def test_commission_accrues_before_minimum_first_topup(monkeypatch):
     assert result is True
     assert user.has_made_first_topup is False
 
-    add_user_balance_mock.assert_awaited_once()
-    add_call = add_user_balance_mock.await_args
-    assert add_call is not None
-    assert add_call.args[1] is referrer
-    assert add_call.args[2] == 3750
-    assert 'Комиссия' in add_call.args[3]
-    assert add_call.kwargs.get('bot') is None
-
-    create_referral_earning_mock.assert_awaited_once()
-    earning_call = create_referral_earning_mock.await_args
-    assert earning_call is not None
-    assert earning_call.kwargs['amount_kopeks'] == 3750
-    assert earning_call.kwargs['reason'] == 'referral_commission_topup'
+    add_user_balance_mock.assert_not_awaited()
+    create_referral_earning_mock.assert_not_awaited()
 
 
 async def test_first_topup_inviter_gets_fixed_plus_commission(monkeypatch):
@@ -236,13 +222,14 @@ async def test_recurring_commission_percent_uses_paid_referrals_tier(monkeypatch
     assert percent == 15
 
 
-async def test_second_small_topup_uses_recurring_tier_not_first_payment_percent(monkeypatch):
+async def test_second_topup_uses_recurring_tier_not_first_payment_percent(monkeypatch):
+    """Повторное пополнение (выше порога) идёт по tiers-проценту, а не по первому."""
     user = SimpleNamespace(
         id=1,
         telegram_id=101,
         full_name='Test User',
         referred_by_id=2,
-        has_made_first_topup=False,
+        has_made_first_topup=True,
     )
     referrer = SimpleNamespace(
         id=2,
@@ -274,13 +261,13 @@ async def test_second_small_topup_uses_recurring_tier_not_first_payment_percent(
     monkeypatch.setattr(referral_service.settings, 'REFERRAL_FIRST_PAYMENT_COMMISSION_PERCENT', 40)
     monkeypatch.setattr(referral_service.settings, 'REFERRAL_RECURRING_COMMISSION_TIERS', '0:10,10:15,50:20')
 
-    result = await referral_service.process_referral_topup(db, user.id, 15000)
+    result = await referral_service.process_referral_topup(db, user.id, 25000)
 
     assert result is True
     add_user_balance_mock.assert_awaited_once()
     add_call = add_user_balance_mock.await_args
     assert add_call is not None
-    assert add_call.args[2] == 2250
+    assert add_call.args[2] == 3750
     assert 'Комиссия 15%' in add_call.args[3]
 
 
