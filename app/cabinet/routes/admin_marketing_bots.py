@@ -58,7 +58,12 @@ class MarketingBotResponse(BaseModel):
 # ============ Endpoints ============
 
 
-@router.get('/', response_model=list[MarketingBotResponse])
+# Коллекционные эндпоинты регистрируются с путём без хвостового слэша
+# (эталон — admin_campaigns) и с дублем со слэшем: cabinet-роутер объявлен
+# с redirect_slashes=False, поэтому рассинхрон слэша даёт 404, а не 307,
+# и фронт не должен зависеть от того, в каком виде он шлёт путь.
+@router.get('', response_model=list[MarketingBotResponse])
+@router.get('/', response_model=list[MarketingBotResponse], include_in_schema=False)
 async def list_marketing_bots(
     admin: User = Depends(require_permission('marketing_bots:read')),
     db: AsyncSession = Depends(get_cabinet_db),
@@ -129,7 +134,8 @@ async def get_marketing_bot(
         )
 
 
-@router.post('/', response_model=MarketingBotResponse, status_code=status.HTTP_201_CREATED)
+@router.post('', response_model=MarketingBotResponse, status_code=status.HTTP_201_CREATED)
+@router.post('/', response_model=MarketingBotResponse, status_code=status.HTTP_201_CREATED, include_in_schema=False)
 async def create_marketing_bot(
     data: MarketingBotCreate,
     admin: User = Depends(require_permission('marketing_bots:write')),
