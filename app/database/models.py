@@ -4777,3 +4777,23 @@ class UserDeviceAlias(Base):
     alias = Column(String(64), nullable=False)
     created_at = Column(AwareDateTime(), server_default=func.now(), nullable=False)
     updated_at = Column(AwareDateTime(), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class MarketingBot(Base):
+    """Standalone marketing Telegram bot that replies with welcome message + image.
+
+    These bots are independent from the main application bot — they run their own
+    polling loops and respond to any incoming message with a fixed greeting.
+    """
+
+    __tablename__ = 'marketing_bots'
+    __table_args__ = (Index('ix_marketing_bots_is_active', 'is_active'),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    bot_token = Column(String(255), nullable=False)
+    welcome_message = Column(Text, nullable=False)
+    image_url = Column(String(512), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True, server_default='true')
+    created_at = Column(AwareDateTime(), server_default=func.now(), nullable=False)
+    updated_at = Column(AwareDateTime(), server_default=func.now(), onupdate=func.now(), nullable=False)

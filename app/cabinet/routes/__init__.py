@@ -18,6 +18,7 @@ from .admin_email_templates import router as admin_email_templates_router
 from .admin_info_pages import router as admin_info_pages_router
 from .admin_landings import router as admin_landings_router
 from .admin_legal_pages import router as admin_legal_pages_router
+from .admin_marketing_bots import router as admin_marketing_bots_router
 from .admin_menu_layout import router as admin_menu_layout_router
 from .admin_news import router as admin_news_router
 from .admin_news_categories import router as admin_news_categories_router
@@ -165,6 +166,7 @@ router.include_router(admin_apps_router)
 router.include_router(admin_roles_router)
 router.include_router(admin_policies_router)
 router.include_router(admin_audit_log_router)
+router.include_router(admin_marketing_bots_router)
 # Categories/tags/media routers MUST be before the main news router
 # to avoid /admin/news/{article_id} catching /admin/news/categories etc.
 router.include_router(admin_news_categories_router)

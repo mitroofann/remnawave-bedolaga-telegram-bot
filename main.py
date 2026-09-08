@@ -466,6 +466,26 @@ async def main():
                 stage.warning(f'Grace-доступ безопасно отключён из-за ошибки конфигурации: {e}')
                 logger.error('Ошибка запуска grace-доступа; основной бот продолжает работу', error=e)
 
+        async with timeline.stage(
+            'Маркетинговые боты',
+            '📢',
+            success_message='Маркетинговые боты запущены',
+        ) as stage:
+            try:
+                from app.database.database import AsyncSessionLocal
+                from app.services.marketing_bot_manager import marketing_bot_manager
+
+                async with AsyncSessionLocal() as db:
+                    await marketing_bot_manager.load_and_start_all(db)
+                    bot_count = len(marketing_bot_manager.bots)
+                    if bot_count > 0:
+                        stage.log(f'Запущено ботов: {bot_count}')
+                    else:
+                        stage.skip('Нет активных маркетинговых ботов')
+            except Exception as e:
+                stage.warning(f'Ошибка запуска маркетинговых ботов: {e}')
+                logger.error('❌ Ошибка запуска маркетинговых ботов', error=e)
+
         # Разовая фоновая чистка накопившихся дублей тарифных подписок (multi-tariff):
         # лишние истёкшие дубли удаляются из БД и панели вместе, как штатное удаление.
         # Идемпотентно — после первой чистки no-op; панель легла — повторит на след. старте.
@@ -931,6 +951,13 @@ async def main():
             await grace_access_runtime.stop()
         except Exception as e:
             logger.error('Ошибка остановки grace-доступа', error=e)
+
+        logger.info('ℹ️ Остановка маркетинговых ботов...')
+        try:
+            from app.services.marketing_bot_manager import marketing_bot_manager
+            await marketing_bot_manager.stop_all()
+        except Exception as e:
+            logger.error('Ошибка остановки маркетинговых ботов', error=e)
 
         logger.info('ℹ️ Остановка сервиса автосинхронизации RemnaWave...')
         try:
