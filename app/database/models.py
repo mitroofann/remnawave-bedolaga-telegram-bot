@@ -4794,6 +4794,8 @@ class MarketingBot(Base):
     bot_token = Column(String(255), nullable=False)
     welcome_message = Column(Text, nullable=False)
     image_url = Column(String(512), nullable=True)
+    button_text = Column(String(100), nullable=True)
+    button_url = Column(String(512), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True, server_default='true')
     created_at = Column(AwareDateTime(), server_default=func.now(), nullable=False)
     updated_at = Column(AwareDateTime(), server_default=func.now(), onupdate=func.now(), nullable=False)

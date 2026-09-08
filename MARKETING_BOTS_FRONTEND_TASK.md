@@ -45,6 +45,8 @@ interface MarketingBot {
   bot_token: string;
   welcome_message: string;
   image_url: string | null;
+  button_text: string | null;
+  button_url: string | null;
   is_active: boolean;
   created_at: string; // ISO datetime
   updated_at: string; // ISO datetime
@@ -55,6 +57,8 @@ interface MarketingBotCreate {
   bot_token: string;
   welcome_message: string;
   image_url?: string | null;
+  button_text?: string | null;
+  button_url?: string | null;
 }
 
 interface MarketingBotUpdate {
@@ -62,6 +66,8 @@ interface MarketingBotUpdate {
   bot_token?: string;
   welcome_message?: string;
   image_url?: string | null;
+  button_text?: string | null;
+  button_url?: string | null;
   is_active?: boolean;
 }
 ```
@@ -127,7 +133,19 @@ interface MarketingBotUpdate {
    - Placeholder: "Добро пожаловать! 🎉\n\nУзнайте больше по ссылке..."
    - Поддерживает HTML/Markdown форматирование
 
-5. **Статус** (`is_active`) - только при редактировании
+5. **Текст кнопки** (`button_text`)
+   - Тип: text input
+   - Необязательное
+   - Placeholder: "Перейти в основной бот"
+   - Hint: "Текст кнопки-ссылки под сообщением (необязательно)"
+
+6. **URL кнопки** (`button_url`)
+   - Тип: text input
+   - Необязательное
+   - Placeholder: "https://t.me/your_main_bot"
+   - Hint: "Ссылка для кнопки (необязательно, требует текст кнопки)"
+
+7. **Статус** (`is_active`) - только при редактировании
    - Тип: checkbox или toggle
    - Label: "Активен"
 
@@ -149,6 +167,8 @@ interface MarketingBotUpdate {
 - `bot_token`: не пустое, формат токена Telegram (regex: `^\d+:[A-Za-z0-9_-]{35}$`)
 - `welcome_message`: не пустое
 - `image_url`: если задан, должен быть валидным URL
+- `button_text` и `button_url`: если задан один, второй тоже должен быть задан (работают только в паре)
+- `button_url`: если задан, должен быть валидным URL
 
 **Кнопки:**
 - "Отмена" - закрыть модалку

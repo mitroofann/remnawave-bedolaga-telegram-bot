@@ -25,6 +25,8 @@ class MarketingBotCreate(BaseModel):
     bot_token: str
     welcome_message: str
     image_url: str | None = None
+    button_text: str | None = None
+    button_url: str | None = None
 
 
 class MarketingBotUpdate(BaseModel):
@@ -32,6 +34,8 @@ class MarketingBotUpdate(BaseModel):
     bot_token: str | None = None
     welcome_message: str | None = None
     image_url: str | None = None
+    button_text: str | None = None
+    button_url: str | None = None
     is_active: bool | None = None
 
 
@@ -41,6 +45,8 @@ class MarketingBotResponse(BaseModel):
     bot_token: str
     welcome_message: str
     image_url: str | None
+    button_text: str | None
+    button_url: str | None
     is_active: bool
     created_at: str
     updated_at: str
@@ -68,6 +74,8 @@ async def list_marketing_bots(
                 bot_token=bot.bot_token,
                 welcome_message=bot.welcome_message,
                 image_url=bot.image_url,
+                button_text=bot.button_text,
+                button_url=bot.button_url,
                 is_active=bot.is_active,
                 created_at=bot.created_at.isoformat(),
                 updated_at=bot.updated_at.isoformat(),
@@ -105,6 +113,8 @@ async def get_marketing_bot(
             bot_token=bot.bot_token,
             welcome_message=bot.welcome_message,
             image_url=bot.image_url,
+            button_text=bot.button_text,
+            button_url=bot.button_url,
             is_active=bot.is_active,
             created_at=bot.created_at.isoformat(),
             updated_at=bot.updated_at.isoformat(),
@@ -132,6 +142,8 @@ async def create_marketing_bot(
             bot_token=data.bot_token,
             welcome_message=data.welcome_message,
             image_url=data.image_url,
+            button_text=data.button_text,
+            button_url=data.button_url,
             is_active=True,
         )
         db.add(bot)
@@ -149,6 +161,8 @@ async def create_marketing_bot(
             bot_token=bot.bot_token,
             welcome_message=bot.welcome_message,
             image_url=bot.image_url,
+            button_text=bot.button_text,
+            button_url=bot.button_url,
             is_active=bot.is_active,
             created_at=bot.created_at.isoformat(),
             updated_at=bot.updated_at.isoformat(),
@@ -189,6 +203,10 @@ async def update_marketing_bot(
             bot.welcome_message = data.welcome_message
         if data.image_url is not None:
             bot.image_url = data.image_url
+        if data.button_text is not None:
+            bot.button_text = data.button_text
+        if data.button_url is not None:
+            bot.button_url = data.button_url
         if data.is_active is not None:
             bot.is_active = data.is_active
 
@@ -206,6 +224,8 @@ async def update_marketing_bot(
             bot_token=bot.bot_token,
             welcome_message=bot.welcome_message,
             image_url=bot.image_url,
+            button_text=bot.button_text,
+            button_url=bot.button_url,
             is_active=bot.is_active,
             created_at=bot.created_at.isoformat(),
             updated_at=bot.updated_at.isoformat(),

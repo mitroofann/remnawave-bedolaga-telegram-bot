@@ -18,12 +18,23 @@ logger = structlog.get_logger(__name__)
 class MarketingBotInstance:
     """Single marketing bot instance with its own polling loop."""
 
-    def __init__(self, bot_id: int, name: str, token: str, welcome_message: str, image_url: str | None):
+    def __init__(
+        self,
+        bot_id: int,
+        name: str,
+        token: str,
+        welcome_message: str,
+        image_url: str | None,
+        button_text: str | None,
+        button_url: str | None,
+    ):
         self.bot_id = bot_id
         self.name = name
         self.token = token
         self.welcome_message = welcome_message
         self.image_url = image_url
+        self.button_text = button_text
+        self.button_url = button_url
         self.bot: Bot | None = None
         self.dp: Dispatcher | None = None
         self.task: asyncio.Task | None = None
@@ -44,16 +55,28 @@ class MarketingBotInstance:
             async def handle_any_message(message: types.Message):
                 """Reply with welcome message + image to any incoming message."""
                 try:
+                    # Prepare reply markup if button is configured
+                    reply_markup = None
+                    if self.button_text and self.button_url:
+                        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+                        keyboard = InlineKeyboardMarkup(
+                            inline_keyboard=[[InlineKeyboardButton(text=self.button_text, url=self.button_url)]]
+                        )
+                        reply_markup = keyboard
+
                     if self.image_url:
                         await message.answer_photo(
                             photo=self.image_url,
                             caption=self.welcome_message,
                             parse_mode='HTML',
+                            reply_markup=reply_markup,
                         )
                     else:
                         await message.answer(
                             text=self.welcome_message,
                             parse_mode='HTML',
+                            reply_markup=reply_markup,
                         )
                 except Exception as e:
                     logger.error(
@@ -105,7 +128,15 @@ class MarketingBotInstance:
         self.dp = None
         logger.info('Marketing bot stopped', bot_id=self.bot_id, name=self.name)
 
-    async def reload(self, name: str, token: str, welcome_message: str, image_url: str | None):
+    async def reload(
+        self,
+        name: str,
+        token: str,
+        welcome_message: str,
+        image_url: str | None,
+        button_text: str | None,
+        button_url: str | None,
+    ):
         """Reload bot configuration (restart if token changed)."""
         token_changed = self.token != token
 
@@ -113,6 +144,8 @@ class MarketingBotInstance:
         self.token = token
         self.welcome_message = welcome_message
         self.image_url = image_url
+        self.button_text = button_text
+        self.button_url = button_url
 
         if token_changed:
             logger.info('Marketing bot token changed, restarting', bot_id=self.bot_id, name=self.name)
@@ -154,6 +187,8 @@ class MarketingBotManager:
             token=bot_record.bot_token,
             welcome_message=bot_record.welcome_message,
             image_url=bot_record.image_url,
+            button_text=bot_record.button_text,
+            button_url=bot_record.button_url,
         )
         await instance.start()
         self.bots[bot_record.id] = instance
@@ -182,6 +217,8 @@ class MarketingBotManager:
                     token=bot_record.bot_token,
                     welcome_message=bot_record.welcome_message,
                     image_url=bot_record.image_url,
+                    button_text=bot_record.button_text,
+                    button_url=bot_record.button_url,
                 )
 
     async def remove_bot(self, bot_id: int):

@@ -37,6 +37,8 @@ def upgrade() -> None:
             sa.Column('bot_token', sa.String(length=255), nullable=False),
             sa.Column('welcome_message', sa.Text(), nullable=False),
             sa.Column('image_url', sa.String(length=512), nullable=True),
+            sa.Column('button_text', sa.String(length=100), nullable=True),
+            sa.Column('button_url', sa.String(length=512), nullable=True),
             sa.Column('is_active', sa.Boolean(), nullable=False, server_default='true'),
             sa.Column('created_at', sa.DateTime(timezone=True), nullable=False, server_default=sa.text('now()')),
             sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False, server_default=sa.text('now()')),
