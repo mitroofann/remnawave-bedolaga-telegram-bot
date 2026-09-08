@@ -370,6 +370,39 @@ async def _build_subscription_info_async(db: AsyncSession, subscription: Subscri
     return info
 
 
+async def _record_panel_identity(
+    db: AsyncSession,
+    subscription: Subscription,
+    panel_user_id: int,
+    changes: dict,
+) -> None:
+    """Записать id найденного аккаунта панели на строку подписки, если она его не знает.
+
+    В одиночном режиме аккаунт панели общий и известен через ``users.remnawave_id``,
+    но экраны админки по выбранной подписке (panel-info, устройства, трафик) читают
+    строго ``subscriptions.remnawave_id``: новая строка без него — «пользователь не
+    найден в панели». Так оставалась подписка, созданная админом после удаления
+    старой: помощник обновлял аккаунт, а id на строку не писал.
+
+    Колонка частично уникальна: если id уже держит соседняя строка того же
+    человека, не пишем — адресация остаётся через пользователя, а IntegrityError
+    после успешного PATCH в панель откатил бы всё сделанное.
+    """
+    if subscription.remnawave_id:
+        return
+    from app.services.subscription_service import link_subscription_panel_identity
+
+    if await link_subscription_panel_identity(db, subscription, panel_user_id):
+        changes['panel_user_id'] = panel_user_id
+        changes['subscription_linked'] = True
+        return
+    logger.warning(
+        'Panel id is held by another subscription row; leaving this row unlinked',
+        subscription_id=subscription.id,
+        panel_user_id=panel_user_id,
+    )
+
+
 async def _sync_subscription_to_panel(
     db: AsyncSession,
     user: User,
@@ -541,6 +574,7 @@ async def _sync_subscription_to_panel(
                     subscription.subscription_url = updated_panel_user.subscription_url
                     subscription.subscription_crypto_link = updated_panel_user.happ_crypto_link
                     subscription.remnawave_short_uuid = updated_panel_user.short_uuid
+                    await _record_panel_identity(db, subscription, panel_user_id, changes)
                     changes['action'] = 'updated'
                     logger.info('Updated user in Remnawave panel', user_id=user.id)
                 except Exception as update_error:
@@ -3271,6 +3305,15 @@ async def disable_user(
             detail='User not found',
         )
 
+    from app.services.rbac_bootstrap_service import is_protected_from_blocking
+
+    if is_protected_from_blocking(user):
+        logger.warning('Refused to block an env-configured admin', admin_id=admin.id, user_id=user_id)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail='This account is listed in ADMIN_IDS/ADMIN_EMAILS and cannot be blocked',
+        )
+
     subscription_deactivated = False
     panel_deactivated = False
     panel_error: str | None = None
@@ -3297,8 +3340,12 @@ async def disable_user(
                     if sub.remnawave_id:
                         try:
                             await subscription_service.disable_remnawave_user(sub.remnawave_id, db=db)
-                        except Exception:
-                            pass
+                        except Exception as error:
+                            logger.warning(
+                                'Не удалось отключить пользователя панели при деактивации',
+                                remnawave_id=sub.remnawave_id,
+                                error=str(error),
+                            )
                 panel_deactivated = True
             elif user.remnawave_id:
                 panel_deactivated = await subscription_service.disable_remnawave_user(user.remnawave_id, db=db)
@@ -4411,6 +4458,7 @@ async def sync_user_to_panel(
                         sub.id,
                         **update_kwargs,
                     )
+                    await _record_panel_identity(db, sub, panel_user_id, changes)
                     action = 'updated'
                 except Exception as update_error:
                     # «Пользователя нет» = только явный признак этого (404/A018/A063).

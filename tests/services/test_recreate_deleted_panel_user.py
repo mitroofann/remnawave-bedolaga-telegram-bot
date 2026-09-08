@@ -10,8 +10,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import app.services.monitoring_service as monitoring_service_mod
-import app.services.subscription_service as subscription_service_mod
 from app.config import Settings
 from app.database.models import SubscriptionStatus
 from app.external.remnawave_api import (
@@ -191,8 +189,8 @@ async def test_recreate_skips_active_status_with_past_end_date():
 def _setup_subscription_service(monkeypatch, api):
     monkeypatch.setattr(Settings, 'is_multi_tariff_enabled', lambda self: False)
     service = SubscriptionService()
-    monkeypatch.setattr(subscription_service_mod, 'get_user_by_id', AsyncMock(return_value=_make_user()))
-    monkeypatch.setattr(subscription_service_mod, 'resolve_hwid_device_limit_for_payload', lambda s: None)
+    monkeypatch.setattr('app.services.subscription_service.get_user_by_id', AsyncMock(return_value=_make_user()))
+    monkeypatch.setattr('app.services.subscription_service.resolve_hwid_device_limit_for_payload', lambda s: None)
     _patch_api_client(monkeypatch, service, api)
     return service
 
@@ -222,7 +220,7 @@ async def test_update_skips_panel_when_no_panel_id(monkeypatch):
     service = _setup_subscription_service(monkeypatch, api)
     user_without_panel = _make_user()
     user_without_panel.remnawave_id = None
-    monkeypatch.setattr(subscription_service_mod, 'get_user_by_id', AsyncMock(return_value=user_without_panel))
+    monkeypatch.setattr('app.services.subscription_service.get_user_by_id', AsyncMock(return_value=user_without_panel))
     service.create_remnawave_user = AsyncMock()
 
     result = await service.update_remnawave_user(AsyncMock(), _make_subscription())
@@ -626,8 +624,8 @@ def _setup_monitoring_service(monkeypatch, api):
     service = MonitoringService()
     service.subscription_service._config_error = None  # is_configured → True
 
-    monkeypatch.setattr(monitoring_service_mod, 'get_user_by_id', AsyncMock(return_value=_make_user()))
-    monkeypatch.setattr(monitoring_service_mod, 'resolve_hwid_device_limit_for_payload', lambda s: None)
+    monkeypatch.setattr('app.services.monitoring_service.get_user_by_id', AsyncMock(return_value=_make_user()))
+    monkeypatch.setattr('app.services.monitoring_service.resolve_hwid_device_limit_for_payload', lambda s: None)
     _patch_api_client(monkeypatch, service.subscription_service, api)
     return service
 
@@ -967,7 +965,7 @@ async def test_update_adopts_panel_id_by_short_uuid_instead_of_giving_up(monkeyp
 
     service = SubscriptionService()
     _patch_api_client(monkeypatch, service, api)
-    monkeypatch.setattr(subscription_service_mod, 'get_user_by_id', AsyncMock(return_value=_make_user()))
+    monkeypatch.setattr('app.services.subscription_service.get_user_by_id', AsyncMock(return_value=_make_user()))
 
     sub = _sub_for_multi()
     sub.remnawave_id = None
@@ -991,7 +989,7 @@ async def test_update_still_gives_up_when_the_panel_does_not_know_the_short_uuid
 
     service = SubscriptionService()
     _patch_api_client(monkeypatch, service, api)
-    monkeypatch.setattr(subscription_service_mod, 'get_user_by_id', AsyncMock(return_value=_make_user()))
+    monkeypatch.setattr('app.services.subscription_service.get_user_by_id', AsyncMock(return_value=_make_user()))
 
     sub = _sub_for_multi()
     sub.remnawave_id = None
@@ -1009,7 +1007,7 @@ async def test_update_gives_up_when_the_panel_is_unreachable(monkeypatch):
 
     service = SubscriptionService()
     _patch_api_client(monkeypatch, service, api)
-    monkeypatch.setattr(subscription_service_mod, 'get_user_by_id', AsyncMock(return_value=_make_user()))
+    monkeypatch.setattr('app.services.subscription_service.get_user_by_id', AsyncMock(return_value=_make_user()))
 
     sub = _sub_for_multi()
     sub.remnawave_id = None
@@ -1050,8 +1048,8 @@ async def test_single_mode_prefers_exact_keys_over_ambiguous_telegram_search(mon
 
     monkeypatch.setattr(Settings, 'is_multi_tariff_enabled', lambda self: False)
     service = SubscriptionService()
-    monkeypatch.setattr(subscription_service_mod, 'get_user_by_id', AsyncMock(return_value=user))
-    monkeypatch.setattr(subscription_service_mod, 'resolve_hwid_device_limit_for_payload', lambda s: None)
+    monkeypatch.setattr('app.services.subscription_service.get_user_by_id', AsyncMock(return_value=user))
+    monkeypatch.setattr('app.services.subscription_service.resolve_hwid_device_limit_for_payload', lambda s: None)
     _patch_api_client(monkeypatch, service, api)
 
     async with service.get_api_client() as client:
@@ -1101,8 +1099,8 @@ async def test_single_mode_uses_the_subscription_own_panel_id(monkeypatch):
 
     monkeypatch.setattr(Settings, 'is_multi_tariff_enabled', lambda self: False)
     service = SubscriptionService()
-    monkeypatch.setattr(subscription_service_mod, 'get_user_by_id', AsyncMock(return_value=user))
-    monkeypatch.setattr(subscription_service_mod, 'resolve_hwid_device_limit_for_payload', lambda s: None)
+    monkeypatch.setattr('app.services.subscription_service.get_user_by_id', AsyncMock(return_value=user))
+    monkeypatch.setattr('app.services.subscription_service.resolve_hwid_device_limit_for_payload', lambda s: None)
     _patch_api_client(monkeypatch, service, api)
 
     async with service.get_api_client() as client:
@@ -1164,9 +1162,9 @@ async def test_create_does_not_break_on_the_partial_unique_index(monkeypatch):
         updated = SimpleNamespace(id=77, short_uuid='s77', subscription_url='https://s/u', happ_crypto_link=None)
 
         monkeypatch.setattr(
-            subscription_service_mod, 'get_user_by_id', AsyncMock(return_value=await db.get(UserModel, 1))
+            'app.services.subscription_service.get_user_by_id', AsyncMock(return_value=await db.get(UserModel, 1))
         )
-        monkeypatch.setattr(subscription_service_mod, 'resolve_hwid_device_limit_for_payload', lambda s: None)
+        monkeypatch.setattr('app.services.subscription_service.resolve_hwid_device_limit_for_payload', lambda s: None)
         monkeypatch.setattr(service, 'validate_and_clean_subscription', AsyncMock(return_value=True))
         monkeypatch.setattr(service, '_create_or_update_remnawave_user_single', AsyncMock(return_value=updated))
         monkeypatch.setattr(service, '_create_or_update_remnawave_user_multi', AsyncMock(return_value=updated))
@@ -1263,8 +1261,8 @@ async def test_degraded_short_uuid_endpoint_does_not_abort_a_resolvable_sync(mon
 
     monkeypatch.setattr(Settings, 'is_multi_tariff_enabled', lambda self: False)
     service = SubscriptionService()
-    monkeypatch.setattr(subscription_service_mod, 'get_user_by_id', AsyncMock(return_value=user))
-    monkeypatch.setattr(subscription_service_mod, 'resolve_hwid_device_limit_for_payload', lambda s: None)
+    monkeypatch.setattr('app.services.subscription_service.get_user_by_id', AsyncMock(return_value=user))
+    monkeypatch.setattr('app.services.subscription_service.resolve_hwid_device_limit_for_payload', lambda s: None)
     _patch_api_client(monkeypatch, service, api)
 
     async with service.get_api_client() as client:
@@ -1302,8 +1300,8 @@ async def test_degraded_short_uuid_endpoint_still_refuses_to_create_a_duplicate(
 
     monkeypatch.setattr(Settings, 'is_multi_tariff_enabled', lambda self: False)
     service = SubscriptionService()
-    monkeypatch.setattr(subscription_service_mod, 'get_user_by_id', AsyncMock(return_value=user))
-    monkeypatch.setattr(subscription_service_mod, 'resolve_hwid_device_limit_for_payload', lambda s: None)
+    monkeypatch.setattr('app.services.subscription_service.get_user_by_id', AsyncMock(return_value=user))
+    monkeypatch.setattr('app.services.subscription_service.resolve_hwid_device_limit_for_payload', lambda s: None)
     _patch_api_client(monkeypatch, service, api)
 
     with pytest.raises(RemnaWaveAPIError):

@@ -35,6 +35,7 @@ from app.services.payment_verification_service import (
     get_enabled_auto_methods,
     method_display_name,
 )
+from app.services.reachability.service import reachability_service
 from app.services.referral_contest_service import referral_contest_service
 from app.services.remnawave_sync_service import remnawave_sync_service
 from app.services.reporting_service import reporting_service
@@ -320,6 +321,18 @@ async def main():
         traffic_monitoring_scheduler.set_bot(bot)
         daily_subscription_service.set_bot(bot)
         telegram_notifier.set_bot(bot)
+
+        # Хранилище ошибок: пишет события ДО попытки доставки в Telegram,
+        # поэтому они переживают недоступность всех путей до чата.
+        from app.services.system_error_log_service import system_error_log_service
+
+        await system_error_log_service.start()
+
+        # Очередь повторной отправки писем: без неё письмо, не ушедшее во время
+        # обрыва SMTP-канала, терялось молча — включая код регистрации.
+        from app.services.email_retry_service import email_retry_service
+
+        await email_retry_service.start()
 
         from app.services.channel_subscription_service import channel_subscription_service
 
@@ -662,6 +675,18 @@ async def main():
             stage.log(f'Интервал опроса: {settings.MONITORING_INTERVAL}с')
 
         async with timeline.stage(
+            'Доступность из РФ (bschekbot)',
+            '📶',
+            success_message='Обходчик задач проверки запущен',
+        ) as stage:
+            reachability_enabled = settings.is_bschek_enabled() and settings.is_bschek_configured()
+            if reachability_enabled:
+                reachability_service.start_background()
+                stage.log('Незавершённые задачи будут подхвачены обходчиком')
+            else:
+                stage.skip('Интеграция bschekbot выключена или без ключа')
+
+        async with timeline.stage(
             'Служба техработ',
             '🛡️',
             success_message='Служба техработ запущена',
@@ -819,6 +844,10 @@ async def main():
                         logger.error('Служба техработ завершилась с ошибкой', error=exception)
                         maintenance_task = asyncio.create_task(maintenance_service.start_monitoring())
 
+                if reachability_enabled:
+                    # Идемпотентно: перезапускает только упавший обходчик, живой не трогает.
+                    reachability_service.start_background()
+
                 if version_check_task and version_check_task.done():
                     exception = version_check_task.exception()
                     if exception:
@@ -894,10 +923,13 @@ async def main():
             logger.info('ℹ️ Остановка службы мониторинга...')
             monitoring_service.stop_monitoring()
             monitoring_task.cancel()
-            try:
-                await monitoring_task
-            except asyncio.CancelledError:
-                pass
+            await asyncio.wait([monitoring_task])
+
+        logger.info('ℹ️ Остановка обходчика задач проверки доступности...')
+        try:
+            await reachability_service.stop_background()
+        except Exception as error:
+            logger.warning('Не удалось остановить обходчик задач проверки', error=error)
 
         if maintenance_task and not maintenance_task.done():
             logger.info('ℹ️ Остановка службы техработ...')
@@ -977,6 +1009,23 @@ async def main():
                 await log_rotation_service.stop()
             except Exception as e:
                 logger.error('Ошибка остановки сервиса ротации логов', error=e)
+
+        logger.info('ℹ️ Остановка очереди повторной отправки писем...')
+        try:
+            from app.services.email_retry_service import email_retry_service
+
+            await email_retry_service.stop()
+        except Exception as e:
+            logger.warning('Ошибка остановки очереди повторной отправки писем', error=e)
+
+        logger.info('ℹ️ Остановка журнала системных ошибок...')
+        try:
+            from app.services.system_error_log_service import system_error_log_service
+
+            await system_error_log_service.stop()
+        except Exception as e:
+            # warning: error отсюда ушёл бы в тот же конвейер, который мы гасим
+            logger.warning('Ошибка остановки журнала системных ошибок', error=e)
 
         logger.info('ℹ️ Остановка очереди чеков NaloGO...')
         try:

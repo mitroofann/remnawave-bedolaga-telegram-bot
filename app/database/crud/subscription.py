@@ -159,6 +159,23 @@ async def get_subscription_by_user_id(db: AsyncSession, user_id: int) -> Subscri
     return subscription
 
 
+def apply_trial_conversion_defaults(subscription: Subscription) -> None:
+    """Настройки, которые подписка получает, перестав быть триалом.
+
+    У триала ``autopay_enabled`` всегда False: автоплатёж для пробника запрещён —
+    включение отклоняют и бот, и кабинет, а выборка автоплатежей фильтрует
+    ``is_trial``. Значит, на триальной строке пользователь этот флаг выставить не
+    мог, и затирать тут нечего: реальное значение по ``DEFAULT_AUTOPAY_ENABLED``
+    подписка должна получать ровно в момент, когда становится платной.
+
+    Вызывать ТОЛЬКО там, где строка действительно БЫЛА триалом. На продлении уже
+    платной подписки это затрёт осознанный выбор пользователя — поэтому
+    ``_revive_paid_subscription`` и админское продление, где ``is_trial = False``
+    ставится и для не-триалов, сюда не заходят.
+    """
+    subscription.autopay_enabled = settings.is_autopay_enabled_by_default()
+
+
 async def create_trial_subscription(
     db: AsyncSession,
     user_id: int,
@@ -714,6 +731,7 @@ async def replace_subscription(
     device_limit: int,
     connected_squads: list[str],
     is_trial: bool,
+    tariff_id: int | None = None,
     autopay_enabled: bool | None = None,
     autopay_days_before: int | None = None,
     update_server_counters: bool = False,
@@ -750,6 +768,8 @@ async def replace_subscription(
     new_autopay_enabled = subscription.autopay_enabled if autopay_enabled is None else autopay_enabled
     new_autopay_days_before = subscription.autopay_days_before if autopay_days_before is None else autopay_days_before
 
+    if tariff_id is not None:
+        subscription.tariff_id = tariff_id
     subscription.status = SubscriptionStatus.ACTIVE.value
     subscription.is_trial = is_trial
     subscription.start_date = current_time
@@ -1247,6 +1267,7 @@ async def extend_subscription(
             # Transient marker (not persisted): lets purchase handlers report the
             # payment as a trial→paid conversion without a signature change.
             subscription._converted_from_trial = True
+            apply_trial_conversion_defaults(subscription)
             logger.info('🎓 Подписка конвертирована из триала в платную', subscription_id=subscription.id)
 
     if traffic_limit_gb is not None:
@@ -1427,8 +1448,8 @@ async def extend_subscription(
             # so the caller can keep using it (the extension itself is already durable).
             try:
                 await db.rollback()
-            except Exception:
-                pass
+            except Exception as rollback_err:
+                logger.debug('Откат сессии после ошибки очистки уведомлений не удался', error=str(rollback_err))
 
     # Ручное продление (баланс/промокод/бонусные дни админа) при живой привязке
     # Lava: двигаем ближайшее автосписание на добавленные дни, иначе Lava спишет
@@ -2080,6 +2101,11 @@ async def wipe_trial_subscriptions(db: AsyncSession, subscriptions) -> int:
     """Снимает доступ и удаляет переданные триал-подписки — единый код для ботовой
     кнопки «Сбросить триалы» и кабинетного per-user сброса.
 
+    Что делаем с панельным аккаунтом, решает ``REMNAWAVE_USER_DELETE_MODE``: ``delete``
+    сносит его, ``disable`` только отключает (аккаунт остаётся жить, и следующая
+    покупка/триал включат его же). Раньше режим читался только при полном удалении
+    пользователя, и сброс триала удалял аккаунт вопреки настройке.
+
     Панель-юзер удаляется ПЕРВЫМ, и только при успехе сносится строка в БД. Порядок
     «панель → БД» делает операцию race-safe относительно синка панель→бот: когда удаляем
     строку, панель-юзера уже нет — воскрешать (как is_trial=False) нечего. Удаления в
@@ -2110,6 +2136,7 @@ async def wipe_trial_subscriptions(db: AsyncSession, subscriptions) -> int:
     from app.services.subscription_service import SubscriptionService
 
     is_multi = settings.is_multi_tariff_enabled()
+    delete_panel_user = settings.get_remnawave_user_delete_mode() == 'delete'
     service = SubscriptionService()
 
     if service.is_configured:
@@ -2151,7 +2178,10 @@ async def wipe_trial_subscriptions(db: AsyncSession, subscriptions) -> int:
                     panel_user_id = adopted.id
                 async with semaphore:
                     try:
-                        await api.delete_user(panel_user_id)
+                        if delete_panel_user:
+                            await api.delete_user(panel_user_id)
+                        else:
+                            await api.disable_user(panel_user_id)
                         return True
                     except RemnaWaveInvalidUserIdError as error:
                         # Битая ссылка в БД, а не «панель-юзера нет»: удалять по такому
@@ -2166,12 +2196,13 @@ async def wipe_trial_subscriptions(db: AsyncSession, subscriptions) -> int:
                         return False
                     except Exception as error:
                         msg = str(error).lower()
-                        if 'not found' in msg or 'not exist' in msg:
-                            return True  # уже удалён — считаем успехом
+                        if 'not found' in msg or 'not exist' in msg or 'already disabled' in msg:
+                            return True  # уже удалён/отключён — считаем успехом
                         logger.error(
-                            'Не удалось удалить панель-юзера при сбросе триала',
+                            'Не удалось снять панель-юзера при сбросе триала',
                             panel_user_id=panel_user_id,
                             subscription_id=subscription.id,
+                            delete_mode=settings.get_remnawave_user_delete_mode(),
                             error=error,
                         )
                         return False
@@ -2214,7 +2245,9 @@ async def wipe_trial_subscriptions(db: AsyncSession, subscriptions) -> int:
     # идентичность, чтобы синк по ней ничего не восстанавливал. Историческую колонку
     # remnawave_uuid обнуляем заодно: панель-юзера больше нет, и её единственный
     # оставшийся потребитель — one-shot бэкфил, который иначе попробует её разрезолвить.
-    if not is_multi:
+    # В режиме disable аккаунт остался жив: связь с ним стирать нельзя, иначе следующая
+    # покупка заведёт рядом дубль вместо того, чтобы включить отключённый аккаунт.
+    if not is_multi and delete_panel_user:
         user_ids = list({subscription.user_id for subscription in to_reset})
         await db.execute(update(User).where(User.id.in_(user_ids)).values(remnawave_id=None, remnawave_uuid=None))
 

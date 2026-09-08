@@ -1,15 +1,15 @@
 """Add marketing_bots table for standalone marketing telegram bots.
 
-Revision ID: 0109
-Revises: 0108
+Revision ID: 0109_marketing_bots
+Revises: 0108_bulka_sales_flow
 """
 
 import sqlalchemy as sa
 from alembic import op
 
 
-revision = '0109'
-down_revision = '0108'
+revision = '0109_marketing_bots'
+down_revision = '0108_bulka_sales_flow'
 branch_labels = None
 depends_on = None
 

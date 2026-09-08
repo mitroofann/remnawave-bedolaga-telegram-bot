@@ -172,6 +172,8 @@ class PaymentMethod(Enum):
     ANTILOPAY = 'antilopay'
     JUPITER = 'jupiter'
     CISPAY = 'cispay'
+    TABPAY = 'tabpay'
+    PARITYPAY = 'paritypay'
     DONUT = 'donut'
     LAVA = 'lava'
     MANUAL = 'manual'
@@ -1731,6 +1733,152 @@ class CisPayPayment(Base):
         )
 
 
+class TabPayPayment(Base):
+    """Платежи через TabPay (tabpay.org, СБП и карты с 3-D Secure)."""
+
+    __tablename__ = 'tabpay_payments'
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+
+    # Идентификаторы
+    order_id = Column(String(64), unique=True, nullable=False, index=True)  # Наш orderId
+    tabpay_payment_id = Column(String(64), unique=True, nullable=True, index=True)  # id (UUID) от TabPay
+
+    # Суммы (TabPay считает только в копейках и только в рублях)
+    amount_kopeks = Column(Integer, nullable=False)
+    commission_kopeks = Column(Integer, nullable=True)
+    currency = Column(String(10), nullable=False, default='RUB')
+    description = Column(Text, nullable=True)
+
+    # Статусы
+    status = Column(String(32), nullable=False, default='pending')
+    is_paid = Column(Boolean, default=False)
+    # Платёж магазина-песочницы или тестовый вебхук из кабинета: баланс по нему
+    # не зачисляется, деньги у провайдера не двигались.
+    is_test = Column(Boolean, nullable=False, default=False)
+
+    # Данные платежа
+    payment_url = Column(Text, nullable=True)
+    payment_method = Column(String(32), nullable=True)  # 'CARD' / 'SBP' / None (выбирает покупатель)
+
+    # Метаданные
+    metadata_json = Column(JSON, nullable=True)
+    callback_payload = Column(JSON, nullable=True)
+    # Ключи уже обработанных вебхуков вида "{id}:{STATUS}". Повтор доставки и
+    # поздняя оплата (EXPIRED -> SUCCESS) приходят одним и тем же телом, поэтому
+    # идемпотентность считается по паре (id, status), а не по факту оплаты.
+    processed_events = Column(JSON, nullable=True)
+
+    # Временные метки
+    paid_at = Column(AwareDateTime(), nullable=True)
+    # Ссылка не сгорает, пока покупатель не начал оплату, поэтому срок известен
+    # только со стороны TabPay — заполняется, если провайдер его сообщил.
+    expires_at = Column(AwareDateTime(), nullable=True)
+    created_at = Column(AwareDateTime(), default=func.now())
+    updated_at = Column(AwareDateTime(), default=func.now(), onupdate=func.now())
+
+    # Связь с транзакцией
+    transaction_id = Column(Integer, ForeignKey('transactions.id'), nullable=True)
+
+    # Relationships
+    user = relationship('User', backref='tabpay_payments')
+    transaction = relationship('Transaction', backref='tabpay_payment')
+
+    @property
+    def amount_rubles(self) -> float:
+        return self.amount_kopeks / 100
+
+    @property
+    def is_pending(self) -> bool:
+        return self.status == 'pending'
+
+    @property
+    def is_success(self) -> bool:
+        return self.status == 'success' and self.is_paid
+
+    @property
+    def is_failed(self) -> bool:
+        return self.status in ['failed', 'declined', 'expired', 'refunded', 'canceled', 'amount_mismatch', 'error']
+
+    def __repr__(self) -> str:  # pragma: no cover - debug helper
+        return (
+            f'<TabPayPayment(id={self.id}, order_id={self.order_id}, '
+            f'amount={self.amount_rubles}₽, status={self.status})>'
+        )
+
+
+class ParityPayPayment(Base):
+    """Платежи через ParityPay (api.paritypay.net v2, СБП и карты)."""
+
+    __tablename__ = 'paritypay_payments'
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+
+    # Идентификаторы
+    order_id = Column(String(64), unique=True, nullable=False, index=True)  # Наш order_id
+    paritypay_payment_id = Column(String(64), unique=True, nullable=True, index=True)  # id счёта в процессинге
+
+    # Суммы. Провайдер считает в рублях дробным числом, у нас канон — копейки,
+    # поэтому конвертация только через Decimal.
+    amount_kopeks = Column(Integer, nullable=False)
+    # Сколько зачислено на баланс кассы за вычетом комиссии (поле credited)
+    credited_kopeks = Column(Integer, nullable=True)
+    currency = Column(String(10), nullable=False, default='RUB')
+    description = Column(Text, nullable=True)
+
+    # Статусы
+    status = Column(String(32), nullable=False, default='pending')
+    is_paid = Column(Boolean, default=False)
+
+    # Данные платежа
+    payment_url = Column(Text, nullable=True)
+    payment_method = Column(String(32), nullable=True)  # service: 'sbp' / 'card' / None
+
+    # Метаданные
+    metadata_json = Column(JSON, nullable=True)
+    callback_payload = Column(JSON, nullable=True)
+    # Ключи уже обработанных уведомлений вида "{id}:{STATUS}": повтор доставки
+    # приходит тем же телом, а REFUNDED следует за PAID по тому же счёту.
+    processed_events = Column(JSON, nullable=True)
+
+    # Временные метки
+    paid_at = Column(AwareDateTime(), nullable=True)
+    expires_at = Column(AwareDateTime(), nullable=True)
+    created_at = Column(AwareDateTime(), default=func.now())
+    updated_at = Column(AwareDateTime(), default=func.now(), onupdate=func.now())
+
+    # Связь с транзакцией
+    transaction_id = Column(Integer, ForeignKey('transactions.id'), nullable=True)
+
+    # Relationships
+    user = relationship('User', backref='paritypay_payments')
+    transaction = relationship('Transaction', backref='paritypay_payment')
+
+    @property
+    def amount_rubles(self) -> float:
+        return self.amount_kopeks / 100
+
+    @property
+    def is_pending(self) -> bool:
+        return self.status == 'pending'
+
+    @property
+    def is_success(self) -> bool:
+        return self.status == 'success' and self.is_paid
+
+    @property
+    def is_failed(self) -> bool:
+        return self.status in ['failed', 'declined', 'expired', 'refunded', 'amount_mismatch', 'error']
+
+    def __repr__(self) -> str:  # pragma: no cover - debug helper
+        return (
+            f'<ParityPayPayment(id={self.id}, order_id={self.order_id}, '
+            f'amount={self.amount_rubles}₽, status={self.status})>'
+        )
+
+
 class PromoGroup(Base):
     __tablename__ = 'promo_groups'
 
@@ -1866,6 +2014,16 @@ class Tariff(Base):
 
     # Уровень тарифа (для визуального отображения, 1 = базовый)
     tier_level = Column(Integer, default=1, nullable=False)
+
+    # Период, выделенный оператором как самый выгодный (число дней из period_prices).
+    # Хранится днями, а не индексом: набор периодов правят, и индекс после правки
+    # указывал бы на другой период. None = ничего не выделено.
+    highlight_period_days = Column(Integer, nullable=True, default=None)
+
+    # Сам тариф отмечен оператором как выгодный: выделяется в списке тарифов.
+    # Отдельно от highlight_period_days — это разные экраны: сначала выбирают
+    # тариф, потом период внутри него.
+    is_highlighted = Column(Boolean, default=False, server_default='false', nullable=False)
 
     # Дополнительные настройки
     is_trial_available = Column(Boolean, default=False, nullable=False)  # Можно ли взять триал на этом тарифе
@@ -2176,6 +2334,20 @@ class User(Base):
     auto_promo_group_assigned = Column(Boolean, nullable=False, default=False)
     auto_promo_group_threshold_kopeks = Column(BigInteger, nullable=False, default=0)
     referral_commission_percent = Column(Integer, nullable=True)
+    # Выбор пользователя, куда класть дни реферальной награды. NULL — «решай сам»,
+    # то есть прежний автоматический подбор. Хранится идентификатором конкретной
+    # подписки, а не номером тарифа: подписок на один тариф может быть несколько.
+    #
+    # БЕЗ внешнего ключа намеренно. Между users и subscriptions уже есть связь
+    # subscriptions.user_id -> users.id, и вторая делает join между этими
+    # таблицами неоднозначным: SQLAlchemy перестаёт его выводить и роняет
+    # половину запросов приложения. Ссылка здесь мягкая — протухший выбор
+    # (подписка удалена, перенесена при слиянии) проверяется запросом при
+    # начислении и превращается в автоподбор, а не в отказ.
+    referral_days_subscription_id = Column(Integer, nullable=True)
+    # Что предпочитает получать, когда правило платит и деньгами, и днями:
+    # 'money' | 'days'. NULL — «и то и другое», как правило и настроено.
+    referral_reward_preference = Column(String(10), nullable=True)
     promo_offer_discount_percent = Column(Integer, nullable=False, default=0)
     promo_offer_discount_source = Column(String(100), nullable=True)
     promo_offer_discount_expires_at = Column(AwareDateTime(), nullable=True)
@@ -2913,6 +3085,90 @@ class Coupon(Base):
         return f"<Coupon token='{token_prefix}...' status='{self.status}'>"
 
 
+class ReferralRewardType(Enum):
+    """Чем именно выдана награда за реферала."""
+
+    MONEY = 'money'
+    DAYS = 'days'
+
+
+class ReferralRewardTrigger(Enum):
+    """Повод для награды. Задаётся на каждом уровне отдельно."""
+
+    REGISTRATION = 'registration'
+    FIRST_TOPUP = 'first_topup'
+    EVERY_TOPUP = 'every_topup'
+
+
+class ReferralRewardMode(Enum):
+    """Какие бонусы уровня активны: деньги, дни или оба."""
+
+    MONEY = 'money'
+    DAYS = 'days'
+    BOTH = 'both'
+
+
+class ReferralRewardLevel(Base):
+    """Правило награды для одного уровня реферальной цепочки.
+
+    Конфигурация живёт в БД, а не в Settings, намеренно: ключ, заданный в .env,
+    попадает в ENV_OVERRIDE_KEYS и перестаёт меняться из админки. Отдельная таблица
+    этого механизма не касается, поэтому редактируется одинаково из бота и кабинета
+    и переживает перезапуск по определению.
+
+    NULL в percent/fixed_kopeks означает «не начисляется» — ровно то же, что и 0.
+    Отката к legacy-настройкам ``REFERRAL_*`` нет ни на одном уровне, включая
+    первый: иначе уровень с бонусом только приглашённому втихую платил бы и
+    пригласившему. Перенос прежних настроек — отдельная явная кнопка в админке.
+    """
+
+    __tablename__ = 'referral_reward_levels'
+
+    id = Column(Integer, primary_key=True, index=True)
+    level = Column(Integer, nullable=False, unique=True, index=True)
+    is_active = Column(Boolean, nullable=False, default=True, server_default='true')
+
+    reward_mode = Column(String(10), nullable=False, default=ReferralRewardMode.MONEY.value, server_default='money')
+    trigger = Column(
+        String(20), nullable=False, default=ReferralRewardTrigger.FIRST_TOPUP.value, server_default='first_topup'
+    )
+
+    # Пригласивший
+    referrer_percent = Column(Integer, nullable=True)
+    referrer_fixed_kopeks = Column(Integer, nullable=True)
+    referrer_days = Column(Integer, nullable=False, default=0, server_default='0')
+    referrer_tariff_id = Column(Integer, ForeignKey('tariffs.id', ondelete='SET NULL'), nullable=True)
+
+    # Приглашённый
+    referee_fixed_kopeks = Column(Integer, nullable=True)
+    referee_days = Column(Integer, nullable=False, default=0, server_default='0')
+    referee_tariff_id = Column(Integer, ForeignKey('tariffs.id', ondelete='SET NULL'), nullable=True)
+
+    # 0 — без лимита, как у REFERRAL_MAX_COMMISSION_PAYMENTS
+    max_payments = Column(Integer, nullable=False, default=0, server_default='0')
+
+    # Сколько рефералов открывают этот уровень. 0 — доступен сразу.
+    #
+    # Отвечает на вопрос, которого в схеме не хватало: за ЧТО уровень получают.
+    # Номер уровня говорит, чьё пополнение приносит награду (1 — приглашённый
+    # напрямую, 2 — приглашённый им), а порог — с какого момента партнёр начинает
+    # получать доход с этого звена вообще.
+    required_referrals = Column(Integer, nullable=False, default=0, server_default='0')
+
+    # Считать только рефералов с пополнением. По умолчанию да: иначе порог берётся
+    # накруткой пустых регистраций, и уровень открывается, ничего не принеся.
+    required_referrals_active_only = Column(Boolean, nullable=False, default=True, server_default='true')
+
+    created_at = Column(AwareDateTime(), default=func.now())
+    updated_at = Column(AwareDateTime(), default=func.now(), onupdate=func.now())
+
+    referrer_tariff = relationship('Tariff', foreign_keys=[referrer_tariff_id])
+    referee_tariff = relationship('Tariff', foreign_keys=[referee_tariff_id])
+
+    def __repr__(self) -> str:
+        return f'<ReferralRewardLevel level={self.level} mode={self.reward_mode} trigger={self.trigger}>'
+
+
 class ReferralEarning(Base):
     __tablename__ = 'referral_earnings'
 
@@ -2922,6 +3178,18 @@ class ReferralEarning(Base):
 
     amount_kopeks = Column(Integer, nullable=False)
     reason = Column(String(100), nullable=False)
+
+    # Награда может быть выдана днями подписки, а не деньгами. Без этих колонок
+    # дни физически не помещаются в ledger, а вся статистика построена на сумме
+    # amount_kopeks — то есть дневные награды просто не были бы видны.
+    # Без index=True намеренно: обе колонки участвуют либо в выборках, уже
+    # суженных индексом по user_id, либо в агрегатах по всей таблице, которым
+    # индекс не помогает. А их построение на старте — блокирующий CREATE INDEX
+    # на таблице начислений, которая на живой установке большая.
+    reward_type = Column(String(10), nullable=False, default=ReferralRewardType.MONEY.value, server_default='money')
+    level = Column(Integer, nullable=False, default=1, server_default='1')
+    days_granted = Column(Integer, nullable=False, default=0, server_default='0')
+    tariff_id = Column(Integer, ForeignKey('tariffs.id', ondelete='SET NULL'), nullable=True)
 
     referral_transaction_id = Column(Integer, ForeignKey('transactions.id'), nullable=True)
     campaign_id = Column(
@@ -4570,6 +4838,7 @@ class GuestPurchase(Base):
             "flow_kind IS NULL OR flow_kind IN ('trial', 'purchase')",
             name='chk_guest_purchase_flow_kind',
         ),
+        Index('ux_guest_purchases_idempotency_key', 'idempotency_key', unique=True),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -4593,7 +4862,9 @@ class GuestPurchase(Base):
     # Покупка является активацией триала через лендинг-воронку (изолированная фича форка).
     # При True в fulfill_purchase выдаётся trial-подписка вместо платной.
     is_trial = Column(Boolean, nullable=False, default=False, server_default=text('false'))
-    source = Column(String(20), nullable=False, default='landing', server_default='landing')  # 'landing' or 'cabinet'
+    source = Column(
+        String(20), nullable=False, default='landing', server_default='landing'
+    )  # 'landing', 'cabinet', 'bot'
     buyer_user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     gift_recipient_type = Column(String(20), nullable=True)
     gift_recipient_value = Column(String(255), nullable=True)
@@ -4625,6 +4896,9 @@ class GuestPurchase(Base):
     # Оплату подтверждает вебхук платёжки, где куки и сессии покупателя уже
     # нет, поэтому источник атрибуции хранится в самой покупке.
     campaign_slug = Column(String(64), nullable=True)
+    # Идемпотентность покупки (checkout id / idempotency key). Уникальный
+    # индекс ux_guest_purchases_idempotency_key предотвращает повторные списания.
+    idempotency_key = Column(String(64), nullable=True)
 
     landing = relationship('LandingPage', back_populates='guest_purchases', lazy='selectin')
     tariff = relationship('Tariff', lazy='selectin')
@@ -4633,8 +4907,7 @@ class GuestPurchase(Base):
     subscription = relationship('Subscription', foreign_keys=[subscription_id], lazy='selectin')
 
     def __repr__(self) -> str:
-        token_prefix = self.token[:5] if self.token else '?'
-        return f"<GuestPurchase token='{token_prefix}...' status='{self.status}'>"
+        return f"<GuestPurchase id={self.id} status='{self.status}'>"
 
 
 class NewsArticle(Base):
@@ -4799,3 +5072,209 @@ class MarketingBot(Base):
     is_active = Column(Boolean, nullable=False, default=True, server_default='true')
     created_at = Column(AwareDateTime(), server_default=func.now(), nullable=False)
     updated_at = Column(AwareDateTime(), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class SystemErrorEvent(Base):
+    """Ошибки уровня error/critical со статусом доставки в админ-чат.
+
+    Пишется из ``TelegramNotifierProcessor`` ДО попытки отправки, поэтому
+    запись остаётся даже когда все пути до Telegram недоступны. Раньше такие
+    ошибки жили только в docker-логах: провал доставки намеренно логируется
+    как warning (иначе получается петля усиления), и наружу не всплывал.
+    """
+
+    __tablename__ = 'system_error_events'
+    __table_args__ = (
+        Index('ix_system_error_events_status_created', 'delivery_status', 'created_at'),
+        Index('ix_system_error_events_dedup_created', 'dedup_hash', 'created_at'),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # Клиентский идентификатор: строка пишется асинхронно, поэтому в момент
+    # отправки id из БД ещё неизвестен — статус обновляется по event_uid.
+    event_uid = Column(String(32), unique=True, nullable=False, index=True)
+
+    created_at = Column(AwareDateTime(), server_default=func.now(), nullable=False, index=True)
+
+    # Что произошло
+    level = Column(String(16), nullable=False, default='error', index=True)
+    logger_name = Column(String(255), nullable=True, index=True)
+    event = Column(Text, nullable=False)
+    error_type = Column(String(255), nullable=True, index=True)
+    traceback = Column(Text, nullable=True)
+    context = Column(JSON, nullable=True)
+
+    # Telegram-id пользователя, если ошибка произошла в его контексте.
+    # Намеренно без ForeignKey: ошибка может ссылаться на ещё не созданного
+    # или уже удалённого пользователя, а падение записи об ошибке недопустимо.
+    user_id = Column(BigInteger, nullable=True, index=True)
+
+    dedup_hash = Column(String(32), nullable=True)
+
+    # Доставка: pending -> sent | failed | suppressed | skipped
+    delivery_status = Column(String(16), nullable=False, default='pending')
+    delivery_attempts = Column(Integer, nullable=False, default=0)
+    last_attempt_at = Column(AwareDateTime(), nullable=True)
+    delivered_at = Column(AwareDateTime(), nullable=True)
+    delivery_error = Column(Text, nullable=True)
+
+
+class EmailQueueItem(Base):
+    """Письма, которые не удалось отправить сразу — очередь повторных попыток.
+
+    До этого ``send_email`` при ошибке просто возвращал False, и письмо
+    пропадало: во время обрыва SMTP-канала 24 августа так потерялись
+    уведомления, а в худшем случае теряется код подтверждения регистрации,
+    и человек просто не может завести аккаунт.
+
+    Массовые рассылки сюда НЕ попадают (``queue_on_failure=False`` на их
+    стороне) — иначе один обрыв забил бы очередь тысячами писем.
+    """
+
+    __tablename__ = 'email_queue'
+    __table_args__ = (Index('ix_email_queue_status_next_attempt', 'status', 'next_attempt_at'),)
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    to_email = Column(String(320), nullable=False, index=True)
+    subject = Column(Text, nullable=False)
+    body_html = Column(Text, nullable=False)
+    body_text = Column(Text, nullable=True)
+    unsubscribe_url = Column(Text, nullable=True)
+    # [{filename, mimetype, content_b64}] — с ограничением по суммарному размеру
+    attachments_json = Column(JSON, nullable=True)
+
+    # pending -> sent | dead
+    status = Column(String(16), nullable=False, default='pending', index=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    next_attempt_at = Column(AwareDateTime(), nullable=True)
+    last_error = Column(Text, nullable=True)
+
+    # Докуда письмо вообще имеет смысл слать. У кода смены email жизнь 15 минут,
+    # у ссылки сброса пароля — час: доставленное позже письмо выглядит настоящим,
+    # но код в нём уже мёртвый, и это хуже, чем неприход. NULL = ограничения нет.
+    expires_at = Column(AwareDateTime(), nullable=True)
+
+    created_at = Column(AwareDateTime(), server_default=func.now(), nullable=False, index=True)
+    sent_at = Column(AwareDateTime(), nullable=True)
+
+
+class ReachabilityBatch(Base):
+    """Проверка многих серверов одной кнопкой: ⌈N/10⌉ задач probe, идут не более трёх одновременно.
+
+    Статус выводится из задач (все завершены → done / failed / cancelled), цена — их сумма.
+    """
+
+    __tablename__ = 'reachability_batches'
+
+    id = Column(Integer, primary_key=True, index=True)
+    status = Column(String(16), nullable=False, default='pending', index=True)  # pending|running|done|failed|cancelled
+    phase = Column(String(32), nullable=True)  # cancelling
+    started_by_user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    scope = Column(JSON, nullable=False)  # {'kind': problems|stale|all|manual, 'host_refs': [...]}
+    request = Column(JSON, nullable=False)  # шаблон чашек: units, dpi, probes, sni_hosts
+    total_targets = Column(Integer, nullable=False, default=0)
+    estimated_kopeks = Column(Integer, nullable=True)
+    cost_kopeks = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(AwareDateTime(), default=func.now())
+    started_at = Column(AwareDateTime(), nullable=True)
+    finished_at = Column(AwareDateTime(), nullable=True)
+    updated_at = Column(AwareDateTime(), default=func.now(), onupdate=func.now())
+
+    jobs = relationship('ReachabilityJob', back_populates='batch', order_by='ReachabilityJob.id')
+    started_by = relationship('User', backref='reachability_batches')
+
+
+class ReachabilityJob(Base):
+    """Задача проверки достижимости через bschekbot (probe / vless / scan).
+
+    Хранит запрос байт в байт и ключ идемпотентности: любой повтор к API идёт
+    только с ними (иначе списание повторится). ``result`` — сырой итоговый ответ.
+    """
+
+    __tablename__ = 'reachability_jobs'
+    __table_args__ = (Index('ix_reachability_jobs_kind_created', 'kind', 'created_at'),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    kind = Column(String(16), nullable=False)  # probe | vless | scan
+    status = Column(String(16), nullable=False, default='pending', index=True)
+    phase = Column(String(32), nullable=True)  # submitting | waiting | retrieving | polling | cancelling
+    trigger = Column(String(16), nullable=False, default='manual')  # manual | scheduled (v2)
+    started_by_user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+
+    batch_id = Column(Integer, ForeignKey('reachability_batches.id', ondelete='SET NULL'), nullable=True, index=True)
+    idempotency_key = Column(String(64), unique=True, nullable=False)
+    external_id = Column(Integer, nullable=True, index=True)  # scan_id / test_id
+    last_request_id = Column(String(64), nullable=True)
+
+    request = Column(JSON, nullable=False)
+    targets = Column(JSON, nullable=False)
+    units_requested = Column(JSON, nullable=True)
+    units_resolved = Column(JSON, nullable=True)
+    units_effective = Column(JSON, nullable=True)
+    skipped = Column(JSON, nullable=True)
+    dpi = Column(String(8), nullable=False, default='on')
+
+    estimated_kopeks = Column(Integer, nullable=True)
+    estimate_is_exact = Column(Boolean, nullable=False, default=True)
+    cost_kopeks = Column(Integer, nullable=True)
+    refunded_kopeks = Column(Integer, nullable=True)
+
+    result = Column(JSON, nullable=True)
+    error_code = Column(String(64), nullable=True)
+    error_message = Column(Text, nullable=True)
+    retryable = Column(Boolean, nullable=True)
+    attempts = Column(Integer, nullable=False, default=0)
+
+    created_at = Column(AwareDateTime(), default=func.now())
+    started_at = Column(AwareDateTime(), nullable=True)
+    finished_at = Column(AwareDateTime(), nullable=True)
+    updated_at = Column(AwareDateTime(), default=func.now(), onupdate=func.now())
+
+    legs = relationship(
+        'ReachabilityLeg', back_populates='job', cascade='all, delete-orphan', order_by='ReachabilityLeg.id'
+    )
+    started_by = relationship('User', backref='reachability_jobs')
+    batch = relationship('ReachabilityBatch', back_populates='jobs')
+
+
+class ReachabilityLeg(Base):
+    """Пара цель × симка с вердиктом — из неё строится сводка. Только probe и vless."""
+
+    __tablename__ = 'reachability_legs'
+    __table_args__ = (Index('ix_reachability_legs_target_unit_time', 'target_key', 'op_key', 'checked_at'),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey('reachability_jobs.id', ondelete='CASCADE'), nullable=False, index=True)
+    kind = Column(String(16), nullable=False)
+    target_key = Column(String(255), nullable=False)  # адрес:порт в нижнем регистре
+    target_kind = Column(String(32), nullable=True)  # host | node | subscription_config | custom
+    target_ref = Column(String(255), nullable=True)  # uuid хоста / uuid ноды / shortUuid
+    op_key = Column(String(64), nullable=False)
+    operator = Column(String(32), nullable=True)
+    region = Column(String(32), nullable=True)
+    dpi = Column(String(8), nullable=True)
+    verdict = Column(String(16), nullable=False)  # reachable | blocked | down | unknown | cancelled
+    matches_expectation = Column(Boolean, nullable=True)
+    raw = Column(JSON, nullable=True)
+    checked_at = Column(AwareDateTime(), nullable=False)
+
+    job = relationship('ReachabilityJob', back_populates='legs')
+
+
+class ReachabilityTargetPref(Base):
+    """Назначение цели (под Белый список / обычный) и её исключение из сводки — решение админа."""
+
+    __tablename__ = 'reachability_target_prefs'
+    __table_args__ = (UniqueConstraint('target_kind', 'target_ref', name='uq_reachability_target_prefs_target'),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    target_kind = Column(String(32), nullable=False)  # host | node
+    target_ref = Column(String(255), nullable=False)
+    purpose = Column(String(16), nullable=False, default='unknown')  # bs | regular | unknown
+    excluded = Column(Boolean, nullable=False, default=False)
+    note = Column(Text, nullable=True)
+    updated_by_user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    updated_at = Column(AwareDateTime(), default=func.now(), onupdate=func.now())

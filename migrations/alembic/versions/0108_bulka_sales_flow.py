@@ -1,15 +1,15 @@
 """Additive Bulka authenticated landing sales-flow fields.
 
-Revision ID: 0108
-Revises: 0107
+Revision ID: 0108_bulka_sales_flow
+Revises: 0107_expire_squads
 """
 
 import sqlalchemy as sa
 from alembic import op
 
 
-revision = '0108'
-down_revision = '0107'
+revision = '0108_bulka_sales_flow'
+down_revision = '0107_expire_squads'
 branch_labels = None
 depends_on = None
 

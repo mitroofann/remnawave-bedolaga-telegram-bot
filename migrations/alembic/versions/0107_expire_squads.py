@@ -12,15 +12,15 @@
 (information_schema) — безопасна на проде, на свежей БД (bootstrap из моделей + stamp head)
 не прогоняется. См. [[deferred-squad-limit-feature]], [[alembic-merge-revision-collision]].
 
-Revision ID: 0107
-Revises: 0106
+Revision ID: 0107_expire_squads
+Revises: 0106_traffic_limit_squads
 """
 
 import sqlalchemy as sa
 from alembic import op
 
 
-revision = '0107'
+revision = '0107_expire_squads'
 down_revision = '0106_traffic_limit_squads'
 branch_labels = None
 depends_on = None
