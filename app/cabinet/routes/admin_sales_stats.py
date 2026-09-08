@@ -16,6 +16,7 @@ from app.database.crud.transaction import (
     traffic_addon_clause,
 )
 from app.database.models import (
+    AdvertisingCampaignRegistration,
     GuestPurchase,
     PaymentMethod,
     Subscription,
@@ -88,6 +89,22 @@ def _parse_period(
     return datetime(2020, 1, 1, tzinfo=UTC), now
 
 
+def _apply_campaign_filter(query, campaign_id: int | None):
+    """Apply campaign filter to a query by joining campaign_registrations.
+
+    Returns the query with JOIN and WHERE clauses added if campaign_id is provided.
+    The query must have User model accessible (either as main entity or via join).
+    """
+    if campaign_id is not None:
+        query = query.join(
+            AdvertisingCampaignRegistration,
+            AdvertisingCampaignRegistration.user_id == User.id
+        ).where(
+            AdvertisingCampaignRegistration.campaign_id == campaign_id
+        )
+    return query
+
+
 # ============ Summary Schemas ============
 
 
@@ -114,6 +131,7 @@ async def get_sales_summary(
     days: int | None = Query(default=30, description='Preset period in days (7, 30, 90, 0=all)'),
     start_date: str | None = Query(default=None, description='Custom start date ISO format'),
     end_date: str | None = Query(default=None, description='Custom end date ISO format'),
+    campaign_id: int | None = Query(default=None, description='Filter by campaign ID'),
     admin: User = Depends(require_permission('sales_stats:read')),
     db: AsyncSession = Depends(get_cabinet_db),
 ) -> SalesSummary:
@@ -122,17 +140,23 @@ async def get_sales_summary(
         period_start, period_end = _parse_period(days, start_date, end_date)
 
         # Total revenue (deposits + direct subscription payments with real payment methods)
-        revenue_result = await db.execute(
-            select(func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0)).where(
-                and_(
-                    Transaction.type.in_([TransactionType.DEPOSIT.value, TransactionType.SUBSCRIPTION_PAYMENT.value]),
-                    Transaction.is_completed == True,
-                    Transaction.payment_method.in_(REAL_PAYMENT_METHODS),
-                    Transaction.created_at >= period_start,
-                    Transaction.created_at <= period_end,
-                )
+        revenue_query = select(func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0)).where(
+            and_(
+                Transaction.type.in_([TransactionType.DEPOSIT.value, TransactionType.SUBSCRIPTION_PAYMENT.value]),
+                Transaction.is_completed == True,
+                Transaction.payment_method.in_(REAL_PAYMENT_METHODS),
+                Transaction.created_at >= period_start,
+                Transaction.created_at <= period_end,
             )
         )
+        if campaign_id is not None:
+            revenue_query = revenue_query.join(User, Transaction.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        revenue_result = await db.execute(revenue_query)
         total_revenue = revenue_result.scalar() or 0
 
         # Gateway-funded gifts never create a Transaction (the recipient "didn't
@@ -140,100 +164,118 @@ async def get_sales_summary(
         # Count it from GuestPurchase. Balance-funded gifts carry payment_method
         # 'balance' and are excluded here — they're already counted via the deposit
         # that funded the balance.
-        gift_revenue_result = await db.execute(
-            select(func.coalesce(func.sum(GuestPurchase.amount_kopeks), 0)).where(
-                and_(
-                    GuestPurchase.is_gift.is_(True),
-                    GuestPurchase.payment_method.in_(REAL_PAYMENT_METHODS),
-                    GuestPurchase.paid_at >= period_start,
-                    GuestPurchase.paid_at <= period_end,
-                )
+        gift_revenue_query = select(func.coalesce(func.sum(GuestPurchase.amount_kopeks), 0)).where(
+            and_(
+                GuestPurchase.is_gift.is_(True),
+                GuestPurchase.payment_method.in_(REAL_PAYMENT_METHODS),
+                GuestPurchase.paid_at >= period_start,
+                GuestPurchase.paid_at <= period_end,
             )
         )
+        if campaign_id is not None:
+            gift_revenue_query = gift_revenue_query.join(User, GuestPurchase.buyer_user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        gift_revenue_result = await db.execute(gift_revenue_query)
         total_revenue += gift_revenue_result.scalar() or 0
 
         # Manual top-ups by admins
-        manual_topup_result = await db.execute(
-            select(func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0)).where(
-                and_(
-                    Transaction.type == TransactionType.DEPOSIT.value,
-                    Transaction.is_completed == True,
-                    Transaction.payment_method == PaymentMethod.MANUAL.value,
-                    Transaction.created_at >= period_start,
-                    Transaction.created_at <= period_end,
-                )
+        manual_topup_query = select(func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0)).where(
+            and_(
+                Transaction.type == TransactionType.DEPOSIT.value,
+                Transaction.is_completed == True,
+                Transaction.payment_method == PaymentMethod.MANUAL.value,
+                Transaction.created_at >= period_start,
+                Transaction.created_at <= period_end,
             )
         )
+        if campaign_id is not None:
+            manual_topup_query = manual_topup_query.join(User, Transaction.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        manual_topup_result = await db.execute(manual_topup_query)
         manual_topup = manual_topup_result.scalar() or 0
 
         # Consolidated subscription counts: active paid, active trial, new trials in period
-        sub_counts_result = await db.execute(
-            select(
-                func.sum(
-                    case(
-                        (
-                            and_(
-                                Subscription.status == SubscriptionStatus.ACTIVE.value, Subscription.is_trial.is_(False)
-                            ),
-                            1,
+        sub_counts_query = select(
+            func.sum(
+                case(
+                    (
+                        and_(
+                            Subscription.status == SubscriptionStatus.ACTIVE.value, Subscription.is_trial.is_(False)
                         ),
-                        else_=0,
-                    )
-                ).label('active_paid'),
-                func.sum(
-                    case(
-                        (
-                            and_(
-                                Subscription.status == SubscriptionStatus.ACTIVE.value, Subscription.is_trial.is_(True)
-                            ),
-                            1,
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label('active_paid'),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            Subscription.status == SubscriptionStatus.ACTIVE.value, Subscription.is_trial.is_(True)
                         ),
-                        else_=0,
-                    )
-                ).label('active_trial'),
-                func.sum(
-                    case(
-                        (
-                            and_(
-                                Subscription.is_trial.is_(True),
-                                Subscription.created_at >= period_start,
-                                Subscription.created_at <= period_end,
-                            ),
-                            1,
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label('active_trial'),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            Subscription.is_trial.is_(True),
+                            Subscription.created_at >= period_start,
+                            Subscription.created_at <= period_end,
                         ),
-                        else_=0,
-                    )
-                ).label('new_trials'),
-                # New PAID subscriptions started in the period.
-                func.sum(
-                    case(
-                        (
-                            and_(
-                                Subscription.is_trial.is_(False),
-                                Subscription.created_at >= period_start,
-                                Subscription.created_at <= period_end,
-                            ),
-                            1,
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label('new_trials'),
+            # New PAID subscriptions started in the period.
+            func.sum(
+                case(
+                    (
+                        and_(
+                            Subscription.is_trial.is_(False),
+                            Subscription.created_at >= period_start,
+                            Subscription.created_at <= period_end,
                         ),
-                        else_=0,
-                    )
-                ).label('new_paid'),
-                # Paid subscriptions that ENDED in the period (for net active growth).
-                func.sum(
-                    case(
-                        (
-                            and_(
-                                Subscription.is_trial.is_(False),
-                                Subscription.end_date >= period_start,
-                                Subscription.end_date <= period_end,
-                            ),
-                            1,
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label('new_paid'),
+            # Paid subscriptions that ENDED in the period (for net active growth).
+            func.sum(
+                case(
+                    (
+                        and_(
+                            Subscription.is_trial.is_(False),
+                            Subscription.end_date >= period_start,
+                            Subscription.end_date <= period_end,
                         ),
-                        else_=0,
-                    )
-                ).label('expired_paid'),
-            )
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label('expired_paid'),
         )
+        if campaign_id is not None:
+            sub_counts_query = sub_counts_query.join(User, Subscription.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        sub_counts_result = await db.execute(sub_counts_query)
         row = sub_counts_result.one()
         active_subs = row.active_paid or 0
         active_trials = row.active_trial or 0
@@ -243,26 +285,38 @@ async def get_sales_summary(
 
         # Trial-to-paid conversion in period
         # Method 1: SubscriptionConversion records (only created by some purchase flows)
-        conversions_result = await db.execute(
-            select(func.count(SubscriptionConversion.id)).where(
-                and_(
-                    SubscriptionConversion.converted_at >= period_start,
-                    SubscriptionConversion.converted_at <= period_end,
-                )
+        conversions_query = select(func.count(SubscriptionConversion.id)).where(
+            and_(
+                SubscriptionConversion.converted_at >= period_start,
+                SubscriptionConversion.converted_at <= period_end,
             )
         )
+        if campaign_id is not None:
+            conversions_query = conversions_query.join(User, SubscriptionConversion.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        conversions_result = await db.execute(conversions_query)
         conversion_records = conversions_result.scalar() or 0
 
         # Method 2: Users registered in period who have paid (catches all purchase flows)
-        converted_users_result = await db.execute(
-            select(func.count(User.id)).where(
-                and_(
-                    User.created_at >= period_start,
-                    User.created_at <= period_end,
-                    User.has_had_paid_subscription.is_(True),
-                )
+        converted_users_query = select(func.count(User.id)).where(
+            and_(
+                User.created_at >= period_start,
+                User.created_at <= period_end,
+                User.has_had_paid_subscription.is_(True),
             )
         )
+        if campaign_id is not None:
+            converted_users_query = converted_users_query.join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        converted_users_result = await db.execute(converted_users_query)
         converted_users = converted_users_result.scalar() or 0
 
         # Use the higher count to catch conversions from all purchase flows
@@ -287,37 +341,57 @@ async def get_sales_summary(
             )
             .distinct()
         )
-        renewals_result = await db.execute(
-            select(func.count(Transaction.id)).where(
-                and_(
-                    Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
-                    Transaction.is_completed == True,
-                    # A renewal is a repeat subscription payment — NOT a traffic/device
-                    # top-up (those are add-ons with their own tab); exclude them so
-                    # renewals don't double-count add-on purchases.
-                    ~addon_description_clause(Transaction.description),
-                    Transaction.created_at >= period_start,
-                    Transaction.created_at <= period_end,
-                    Transaction.user_id.in_(renewals_subquery),
-                )
+        if campaign_id is not None:
+            renewals_subquery = renewals_subquery.join(User, Transaction.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+
+        renewals_query = select(func.count(Transaction.id)).where(
+            and_(
+                Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
+                Transaction.is_completed == True,
+                # A renewal is a repeat subscription payment — NOT a traffic/device
+                # top-up (those are add-ons with their own tab); exclude them so
+                # renewals don't double-count add-on purchases.
+                ~addon_description_clause(Transaction.description),
+                Transaction.created_at >= period_start,
+                Transaction.created_at <= period_end,
+                Transaction.user_id.in_(renewals_subquery),
             )
         )
+        if campaign_id is not None:
+            renewals_query = renewals_query.join(User, Transaction.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        renewals_result = await db.execute(renewals_query)
         renewals_count = renewals_result.scalar() or 0
 
         # Add-on revenue for the summary card = ALL add-ons (traffic + devices),
         # so "Доп. услуги" matches the sum of the Add-ons tab. (Previously this was
         # traffic-only and silently dropped device revenue.)
-        addon_revenue_result = await db.execute(
-            select(func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0)).where(
-                and_(
-                    Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
-                    Transaction.is_completed == True,
-                    addon_description_clause(Transaction.description),
-                    Transaction.created_at >= period_start,
-                    Transaction.created_at <= period_end,
-                )
+        addon_revenue_query = select(func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0)).where(
+            and_(
+                Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
+                Transaction.is_completed == True,
+                addon_description_clause(Transaction.description),
+                Transaction.created_at >= period_start,
+                Transaction.created_at <= period_end,
             )
         )
+        if campaign_id is not None:
+            addon_revenue_query = addon_revenue_query.join(User, Transaction.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        addon_revenue_result = await db.execute(addon_revenue_query)
         addon_revenue = addon_revenue_result.scalar() or 0
 
         return SalesSummary(
@@ -376,6 +450,7 @@ async def get_trials_stats(
     days: int | None = Query(default=30),
     start_date: str | None = Query(default=None),
     end_date: str | None = Query(default=None),
+    campaign_id: int | None = Query(default=None, description='Filter by campaign ID'),
     admin: User = Depends(require_permission('sales_stats:read')),
     db: AsyncSession = Depends(get_cabinet_db),
 ) -> TrialsStatsResponse:
@@ -383,37 +458,55 @@ async def get_trials_stats(
     try:
         period_start, period_end = _parse_period(days, start_date, end_date)
 
-        total_result = await db.execute(
-            select(func.count(Subscription.id)).where(
-                and_(
-                    Subscription.is_trial == True,
-                    Subscription.created_at >= period_start,
-                    Subscription.created_at <= period_end,
-                )
+        total_query = select(func.count(Subscription.id)).where(
+            and_(
+                Subscription.is_trial == True,
+                Subscription.created_at >= period_start,
+                Subscription.created_at <= period_end,
             )
         )
+        if campaign_id is not None:
+            total_query = total_query.join(User, Subscription.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        total_result = await db.execute(total_query)
         total_trials = total_result.scalar() or 0
 
         # Conversion: SubscriptionConversion records + fallback to has_had_paid_subscription
-        conversions_result = await db.execute(
-            select(func.count(SubscriptionConversion.id)).where(
-                and_(
-                    SubscriptionConversion.converted_at >= period_start,
-                    SubscriptionConversion.converted_at <= period_end,
-                )
+        conversions_query = select(func.count(SubscriptionConversion.id)).where(
+            and_(
+                SubscriptionConversion.converted_at >= period_start,
+                SubscriptionConversion.converted_at <= period_end,
             )
         )
+        if campaign_id is not None:
+            conversions_query = conversions_query.join(User, SubscriptionConversion.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        conversions_result = await db.execute(conversions_query)
         conversion_records = conversions_result.scalar() or 0
 
-        converted_users_result = await db.execute(
-            select(func.count(User.id)).where(
-                and_(
-                    User.created_at >= period_start,
-                    User.created_at <= period_end,
-                    User.has_had_paid_subscription.is_(True),
-                )
+        converted_users_query = select(func.count(User.id)).where(
+            and_(
+                User.created_at >= period_start,
+                User.created_at <= period_end,
+                User.has_had_paid_subscription.is_(True),
             )
         )
+        if campaign_id is not None:
+            converted_users_query = converted_users_query.join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        converted_users_result = await db.execute(converted_users_query)
         converted_users = converted_users_result.scalar() or 0
         conversions = max(conversion_records, converted_users)
 
@@ -423,15 +516,21 @@ async def get_trials_stats(
             min(round((conversions / total_trial_starters * 100), 1), 100.0) if total_trial_starters > 0 else 0.0
         )
 
-        avg_duration_result = await db.execute(
-            select(func.avg(SubscriptionConversion.trial_duration_days)).where(
-                and_(
-                    SubscriptionConversion.converted_at >= period_start,
-                    SubscriptionConversion.converted_at <= period_end,
-                    SubscriptionConversion.trial_duration_days.isnot(None),
-                )
+        avg_duration_query = select(func.avg(SubscriptionConversion.trial_duration_days)).where(
+            and_(
+                SubscriptionConversion.converted_at >= period_start,
+                SubscriptionConversion.converted_at <= period_end,
+                SubscriptionConversion.trial_duration_days.isnot(None),
             )
         )
+        if campaign_id is not None:
+            avg_duration_query = avg_duration_query.join(User, SubscriptionConversion.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        avg_duration_result = await db.execute(avg_duration_query)
         avg_duration = float(avg_duration_result.scalar() or 0.0)
 
         provider_case = case(
@@ -442,7 +541,7 @@ async def get_trials_stats(
             (User.auth_type == 'email', 'email'),
             else_='telegram',
         )
-        provider_query = await db.execute(
+        provider_query_sql = (
             select(
                 provider_case.label('provider'),
                 func.count(Subscription.id).label('count'),
@@ -457,21 +556,35 @@ async def get_trials_stats(
             )
             .group_by(provider_case)
         )
+        if campaign_id is not None:
+            provider_query_sql = provider_query_sql.join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        provider_query = await db.execute(provider_query_sql)
         by_provider = [ProviderBreakdownItem(provider=row.provider, count=row.count) for row in provider_query]
 
         # Total registrations (all user signups in period)
-        reg_total_result = await db.execute(
-            select(func.count(User.id)).where(
-                and_(
-                    User.created_at >= period_start,
-                    User.created_at <= period_end,
-                )
+        reg_total_query = select(func.count(User.id)).where(
+            and_(
+                User.created_at >= period_start,
+                User.created_at <= period_end,
             )
         )
+        if campaign_id is not None:
+            reg_total_query = reg_total_query.join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        reg_total_result = await db.execute(reg_total_query)
         total_registrations = reg_total_result.scalar() or 0
 
         # Daily registrations (user signups per day)
-        daily_reg_query = await db.execute(
+        daily_reg_query_sql = (
             select(
                 func.date(User.created_at).label('date'),
                 func.count(User.id).label('count'),
@@ -485,13 +598,21 @@ async def get_trials_stats(
             .group_by(func.date(User.created_at))
             .order_by(func.date(User.created_at))
         )
+        if campaign_id is not None:
+            daily_reg_query_sql = daily_reg_query_sql.join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        daily_reg_query = await db.execute(daily_reg_query_sql)
         reg_by_date: dict[str, int] = {}
         for row in daily_reg_query:
             date_str = row.date.isoformat() if hasattr(row.date, 'isoformat') else str(row.date)
             reg_by_date[date_str] = row.count
 
         # Daily trials (trial subscriptions per day)
-        daily_trial_query = await db.execute(
+        daily_trial_query_sql = (
             select(
                 func.date(Subscription.created_at).label('date'),
                 func.count(Subscription.id).label('count'),
@@ -506,6 +627,14 @@ async def get_trials_stats(
             .group_by(func.date(Subscription.created_at))
             .order_by(func.date(Subscription.created_at))
         )
+        if campaign_id is not None:
+            daily_trial_query_sql = daily_trial_query_sql.join(User, Subscription.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        daily_trial_query = await db.execute(daily_trial_query_sql)
         trial_by_date: dict[str, int] = {}
         for row in daily_trial_query:
             date_str = row.date.isoformat() if hasattr(row.date, 'isoformat') else str(row.date)
@@ -586,6 +715,7 @@ async def get_sales_stats(
     days: int | None = Query(default=30),
     start_date: str | None = Query(default=None),
     end_date: str | None = Query(default=None),
+    campaign_id: int | None = Query(default=None, description='Filter by campaign ID'),
     admin: User = Depends(require_permission('sales_stats:read')),
     db: AsyncSession = Depends(get_cabinet_db),
 ) -> SalesStatsResponse:
@@ -599,14 +729,22 @@ async def get_sales_stats(
             Subscription.created_at <= period_end,
         )
 
-        totals_result = await db.execute(select(func.count(Subscription.id).label('count')).where(base_filter))
+        totals_query = select(func.count(Subscription.id).label('count')).where(base_filter)
+        if campaign_id is not None:
+            totals_query = totals_query.join(User, Subscription.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        totals_result = await db.execute(totals_query)
         totals = totals_result.one()
         total_sales = totals.count
 
         # Revenue and the number of payments that make it up, so the average is
         # money-per-payment. (Previously divided by the count of *new* subscriptions,
         # while the sum included renewals/add-ons too — that inflated the average.)
-        revenue_result = await db.execute(
+        revenue_query = (
             select(
                 func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0).label('revenue'),
                 func.count(Transaction.id).label('payments'),
@@ -619,12 +757,20 @@ async def get_sales_stats(
                 )
             )
         )
+        if campaign_id is not None:
+            revenue_query = revenue_query.join(User, Transaction.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        revenue_result = await db.execute(revenue_query)
         rev_row = revenue_result.one()
         total_revenue = rev_row.revenue or 0
         sub_payment_count = rev_row.payments or 0
         avg_order = total_revenue // sub_payment_count if sub_payment_count > 0 else 0
 
-        by_tariff_query = await db.execute(
+        by_tariff_query_sql = (
             select(
                 Tariff.id.label('tariff_id'),
                 Tariff.name.label('tariff_name'),
@@ -635,6 +781,14 @@ async def get_sales_stats(
             .group_by(Tariff.id, Tariff.name)
             .order_by(func.count(Subscription.id).desc())
         )
+        if campaign_id is not None:
+            by_tariff_query_sql = by_tariff_query_sql.join(User, Subscription.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        by_tariff_query = await db.execute(by_tariff_query_sql)
         by_tariff = []
         top_tariff_name = '-'
         for i, row in enumerate(by_tariff_query):
@@ -654,7 +808,7 @@ async def get_sales_stats(
             func.extract('epoch', Subscription.end_date - Subscription.start_date) / 86400,
             SAInteger,
         )
-        by_period_query = await db.execute(
+        by_period_query_sql = (
             select(
                 period_days_expr.label('period_days'),
                 func.count(Subscription.id).label('count'),
@@ -663,11 +817,19 @@ async def get_sales_stats(
             .group_by(period_days_expr)
             .order_by(period_days_expr)
         )
+        if campaign_id is not None:
+            by_period_query_sql = by_period_query_sql.join(User, Subscription.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        by_period_query = await db.execute(by_period_query_sql)
         by_period = [
             SalesByPeriodItem(period_days=int(row.period_days or 0), count=row.count) for row in by_period_query
         ]
 
-        daily_query = await db.execute(
+        daily_query_sql = (
             select(
                 func.date(Transaction.created_at).label('date'),
                 func.count(Transaction.id).label('count'),
@@ -684,6 +846,14 @@ async def get_sales_stats(
             .group_by(func.date(Transaction.created_at))
             .order_by(func.date(Transaction.created_at))
         )
+        if campaign_id is not None:
+            daily_query_sql = daily_query_sql.join(User, Transaction.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        daily_query = await db.execute(daily_query_sql)
         daily = [
             DailySalesItem(
                 date=row.date.isoformat() if hasattr(row.date, 'isoformat') else str(row.date),
@@ -695,7 +865,7 @@ async def get_sales_stats(
 
         # Daily sales grouped by tariff
         tariff_name_col = func.coalesce(Tariff.name, 'Unknown')
-        daily_by_tariff_query = await db.execute(
+        daily_by_tariff_query_sql = (
             select(
                 func.date(Subscription.created_at).label('date'),
                 tariff_name_col.label('tariff_name'),
@@ -706,6 +876,14 @@ async def get_sales_stats(
             .group_by(func.date(Subscription.created_at), tariff_name_col)
             .order_by(func.date(Subscription.created_at), tariff_name_col)
         )
+        if campaign_id is not None:
+            daily_by_tariff_query_sql = daily_by_tariff_query_sql.join(User, Subscription.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        daily_by_tariff_query = await db.execute(daily_by_tariff_query_sql)
         daily_by_tariff = [
             DailyTariffSalesItem(
                 date=row.date.isoformat() if hasattr(row.date, 'isoformat') else str(row.date),
@@ -773,6 +951,7 @@ async def get_renewals_stats(
     days: int | None = Query(default=30),
     start_date: str | None = Query(default=None),
     end_date: str | None = Query(default=None),
+    campaign_id: int | None = Query(default=None, description='Filter by campaign ID'),
     admin: User = Depends(require_permission('sales_stats:read')),
     db: AsyncSession = Depends(get_cabinet_db),
 ) -> RenewalsStatsResponse:
@@ -787,7 +966,7 @@ async def get_renewals_stats(
 
         if is_all_time:
             # For "all time": renewals = users with more than 1 real subscription payment
-            repeat_users_subquery = (
+            repeat_users_subquery_sql = (
                 select(Transaction.user_id)
                 .where(
                     and_(
@@ -799,21 +978,35 @@ async def get_renewals_stats(
                 .group_by(Transaction.user_id)
                 .having(func.count(Transaction.id) > 1)
             )
+            if campaign_id is not None:
+                repeat_users_subquery_sql = repeat_users_subquery_sql.join(User, Transaction.user_id == User.id).join(
+                    AdvertisingCampaignRegistration,
+                    AdvertisingCampaignRegistration.user_id == User.id
+                ).where(
+                    AdvertisingCampaignRegistration.campaign_id == campaign_id
+                )
+            repeat_users_subquery = repeat_users_subquery_sql
             existing_users_subquery = repeat_users_subquery
 
-            current_result = await db.execute(
-                select(
-                    func.count(Transaction.id).label('count'),
-                    func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0).label('revenue'),
-                ).where(
-                    and_(
-                        Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
-                        Transaction.is_completed == True,
-                        not_addon,
-                        Transaction.user_id.in_(repeat_users_subquery),
-                    )
+            current_query = select(
+                func.count(Transaction.id).label('count'),
+                func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0).label('revenue'),
+            ).where(
+                and_(
+                    Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
+                    Transaction.is_completed == True,
+                    not_addon,
+                    Transaction.user_id.in_(repeat_users_subquery),
                 )
             )
+            if campaign_id is not None:
+                current_query = current_query.join(User, Transaction.user_id == User.id).join(
+                    AdvertisingCampaignRegistration,
+                    AdvertisingCampaignRegistration.user_id == User.id
+                ).where(
+                    AdvertisingCampaignRegistration.campaign_id == campaign_id
+                )
+            current_result = await db.execute(current_query)
             current = current_result.one()
             current_count = current.count
             current_revenue = current.revenue
@@ -825,7 +1018,7 @@ async def get_renewals_stats(
             prev_start = period_start - period_length
             prev_end = period_start
 
-            existing_users_subquery = (
+            existing_users_subquery_sql = (
                 select(Transaction.user_id)
                 .where(
                     and_(
@@ -836,27 +1029,41 @@ async def get_renewals_stats(
                 )
                 .distinct()
             )
-
-            current_result = await db.execute(
-                select(
-                    func.count(Transaction.id).label('count'),
-                    func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0).label('revenue'),
+            if campaign_id is not None:
+                existing_users_subquery_sql = existing_users_subquery_sql.join(User, Transaction.user_id == User.id).join(
+                    AdvertisingCampaignRegistration,
+                    AdvertisingCampaignRegistration.user_id == User.id
                 ).where(
-                    and_(
-                        Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
-                        Transaction.is_completed == True,
-                        not_addon,
-                        Transaction.created_at >= period_start,
-                        Transaction.created_at <= period_end,
-                        Transaction.user_id.in_(existing_users_subquery),
-                    )
+                    AdvertisingCampaignRegistration.campaign_id == campaign_id
+                )
+            existing_users_subquery = existing_users_subquery_sql
+
+            current_query = select(
+                func.count(Transaction.id).label('count'),
+                func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0).label('revenue'),
+            ).where(
+                and_(
+                    Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
+                    Transaction.is_completed == True,
+                    not_addon,
+                    Transaction.created_at >= period_start,
+                    Transaction.created_at <= period_end,
+                    Transaction.user_id.in_(existing_users_subquery),
                 )
             )
+            if campaign_id is not None:
+                current_query = current_query.join(User, Transaction.user_id == User.id).join(
+                    AdvertisingCampaignRegistration,
+                    AdvertisingCampaignRegistration.user_id == User.id
+                ).where(
+                    AdvertisingCampaignRegistration.campaign_id == campaign_id
+                )
+            current_result = await db.execute(current_query)
             current = current_result.one()
             current_count = current.count
             current_revenue = current.revenue
 
-            prev_existing_subquery = (
+            prev_existing_subquery_sql = (
                 select(Transaction.user_id)
                 .where(
                     and_(
@@ -867,21 +1074,36 @@ async def get_renewals_stats(
                 )
                 .distinct()
             )
-            prev_result = await db.execute(
-                select(
-                    func.count(Transaction.id).label('count'),
-                    func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0).label('revenue'),
+            if campaign_id is not None:
+                prev_existing_subquery_sql = prev_existing_subquery_sql.join(User, Transaction.user_id == User.id).join(
+                    AdvertisingCampaignRegistration,
+                    AdvertisingCampaignRegistration.user_id == User.id
                 ).where(
-                    and_(
-                        Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
-                        Transaction.is_completed == True,
-                        not_addon,
-                        Transaction.created_at >= prev_start,
-                        Transaction.created_at <= prev_end,
-                        Transaction.user_id.in_(prev_existing_subquery),
-                    )
+                    AdvertisingCampaignRegistration.campaign_id == campaign_id
+                )
+            prev_existing_subquery = prev_existing_subquery_sql
+
+            prev_query = select(
+                func.count(Transaction.id).label('count'),
+                func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0).label('revenue'),
+            ).where(
+                and_(
+                    Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
+                    Transaction.is_completed == True,
+                    not_addon,
+                    Transaction.created_at >= prev_start,
+                    Transaction.created_at <= prev_end,
+                    Transaction.user_id.in_(prev_existing_subquery),
                 )
             )
+            if campaign_id is not None:
+                prev_query = prev_query.join(User, Transaction.user_id == User.id).join(
+                    AdvertisingCampaignRegistration,
+                    AdvertisingCampaignRegistration.user_id == User.id
+                ).where(
+                    AdvertisingCampaignRegistration.campaign_id == campaign_id
+                )
+            prev_result = await db.execute(prev_query)
             prev = prev_result.one()
 
         if prev.count > 0:
@@ -898,21 +1120,27 @@ async def get_renewals_stats(
 
         # Denominator for renewal_rate excludes add-ons too, so the rate is
         # renewals / (new + renewals), not diluted by traffic/device top-ups.
-        total_sub_payments_result = await db.execute(
-            select(func.count(Transaction.id)).where(
-                and_(
-                    Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
-                    Transaction.is_completed == True,
-                    not_addon,
-                    Transaction.created_at >= period_start,
-                    Transaction.created_at <= period_end,
-                )
+        total_sub_payments_query = select(func.count(Transaction.id)).where(
+            and_(
+                Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
+                Transaction.is_completed == True,
+                not_addon,
+                Transaction.created_at >= period_start,
+                Transaction.created_at <= period_end,
             )
         )
+        if campaign_id is not None:
+            total_sub_payments_query = total_sub_payments_query.join(User, Transaction.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        total_sub_payments_result = await db.execute(total_sub_payments_query)
         total_sub_payments = total_sub_payments_result.scalar() or 0
         renewal_rate = round((current_count / total_sub_payments * 100), 1) if total_sub_payments > 0 else 0.0
 
-        daily_query = await db.execute(
+        daily_query_sql = (
             select(
                 func.date(Transaction.created_at).label('date'),
                 func.count(Transaction.id).label('count'),
@@ -930,6 +1158,14 @@ async def get_renewals_stats(
             .group_by(func.date(Transaction.created_at))
             .order_by(func.date(Transaction.created_at))
         )
+        if campaign_id is not None:
+            daily_query_sql = daily_query_sql.join(User, Transaction.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        daily_query = await db.execute(daily_query_sql)
         daily = [
             DailyRenewalItem(
                 date=row.date.isoformat() if hasattr(row.date, 'isoformat') else str(row.date),
@@ -1000,6 +1236,7 @@ async def get_addons_stats(
     days: int | None = Query(default=30),
     start_date: str | None = Query(default=None),
     end_date: str | None = Query(default=None),
+    campaign_id: int | None = Query(default=None, description='Filter by campaign ID'),
     admin: User = Depends(require_permission('sales_stats:read')),
     db: AsyncSession = Depends(get_cabinet_db),
 ) -> AddonsStatsResponse:
@@ -1012,28 +1249,42 @@ async def get_addons_stats(
             TrafficPurchase.created_at <= period_end,
         )
 
-        totals_result = await db.execute(
+        totals_query = (
             select(
                 func.count(TrafficPurchase.id).label('count'),
                 func.coalesce(func.sum(TrafficPurchase.traffic_gb), 0).label('total_gb'),
             ).where(base_filter)
         )
+        if campaign_id is not None:
+            totals_query = totals_query.join(User, TrafficPurchase.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        totals_result = await db.execute(totals_query)
         totals = totals_result.one()
 
-        addon_revenue_result = await db.execute(
-            select(func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0)).where(
-                and_(
-                    Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
-                    Transaction.is_completed == True,
-                    traffic_addon_clause(Transaction.description),
-                    Transaction.created_at >= period_start,
-                    Transaction.created_at <= period_end,
-                )
+        addon_revenue_query = select(func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0)).where(
+            and_(
+                Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
+                Transaction.is_completed == True,
+                traffic_addon_clause(Transaction.description),
+                Transaction.created_at >= period_start,
+                Transaction.created_at <= period_end,
             )
         )
+        if campaign_id is not None:
+            addon_revenue_query = addon_revenue_query.join(User, Transaction.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        addon_revenue_result = await db.execute(addon_revenue_query)
         addon_revenue = addon_revenue_result.scalar() or 0
 
-        by_package_query = await db.execute(
+        by_package_query_sql = (
             select(
                 TrafficPurchase.traffic_gb.label('traffic_gb'),
                 func.count(TrafficPurchase.id).label('count'),
@@ -1042,9 +1293,17 @@ async def get_addons_stats(
             .group_by(TrafficPurchase.traffic_gb)
             .order_by(TrafficPurchase.traffic_gb)
         )
+        if campaign_id is not None:
+            by_package_query_sql = by_package_query_sql.join(User, TrafficPurchase.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        by_package_query = await db.execute(by_package_query_sql)
         by_package = [AddonByPackageItem(traffic_gb=row.traffic_gb, count=row.count) for row in by_package_query]
 
-        daily_query = await db.execute(
+        daily_query_sql = (
             select(
                 func.date(TrafficPurchase.created_at).label('date'),
                 func.count(TrafficPurchase.id).label('count'),
@@ -1054,6 +1313,14 @@ async def get_addons_stats(
             .group_by(func.date(TrafficPurchase.created_at))
             .order_by(func.date(TrafficPurchase.created_at))
         )
+        if campaign_id is not None:
+            daily_query_sql = daily_query_sql.join(User, TrafficPurchase.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        daily_query = await db.execute(daily_query_sql)
         daily = [
             DailyAddonItem(
                 date=row.date.isoformat() if hasattr(row.date, 'isoformat') else str(row.date),
@@ -1071,16 +1338,22 @@ async def get_addons_stats(
             Transaction.created_at >= period_start,
             Transaction.created_at <= period_end,
         )
-        device_result = await db.execute(
-            select(
-                func.count(Transaction.id).label('count'),
-                func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0).label('revenue'),
-            ).where(device_filter)
-        )
+        device_query = select(
+            func.count(Transaction.id).label('count'),
+            func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0).label('revenue'),
+        ).where(device_filter)
+        if campaign_id is not None:
+            device_query = device_query.join(User, Transaction.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        device_result = await db.execute(device_query)
         device_row = device_result.one()
 
         # Daily device purchases
-        daily_device_query = await db.execute(
+        daily_device_query_sql = (
             select(
                 func.date(Transaction.created_at).label('date'),
                 func.count(Transaction.id).label('count'),
@@ -1089,6 +1362,14 @@ async def get_addons_stats(
             .group_by(func.date(Transaction.created_at))
             .order_by(func.date(Transaction.created_at))
         )
+        if campaign_id is not None:
+            daily_device_query_sql = daily_device_query_sql.join(User, Transaction.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        daily_device_query = await db.execute(daily_device_query_sql)
         daily_devices = [
             DailyDeviceItem(
                 date=row.date.isoformat() if hasattr(row.date, 'isoformat') else str(row.date),
@@ -1156,6 +1437,7 @@ async def get_deposits_stats(
     days: int | None = Query(default=30),
     start_date: str | None = Query(default=None),
     end_date: str | None = Query(default=None),
+    campaign_id: int | None = Query(default=None, description='Filter by campaign ID'),
     admin: User = Depends(require_permission('sales_stats:read')),
     db: AsyncSession = Depends(get_cabinet_db),
 ) -> DepositsStatsResponse:
@@ -1172,18 +1454,26 @@ async def get_deposits_stats(
             Transaction.created_at <= period_end,
         )
 
-        totals_result = await db.execute(
+        totals_query = (
             select(
                 func.count(Transaction.id).label('count'),
                 func.coalesce(func.sum(func.abs(Transaction.amount_kopeks)), 0).label('amount'),
             ).where(base_filter)
         )
+        if campaign_id is not None:
+            totals_query = totals_query.join(User, Transaction.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        totals_result = await db.execute(totals_query)
         totals = totals_result.one()
         total_deposits = totals.count
         total_amount = totals.amount
         avg_deposit = total_amount // total_deposits if total_deposits > 0 else 0
 
-        by_method_query = await db.execute(
+        by_method_query_sql = (
             select(
                 Transaction.payment_method.label('method'),
                 func.count(Transaction.id).label('count'),
@@ -1193,12 +1483,20 @@ async def get_deposits_stats(
             .group_by(Transaction.payment_method)
             .order_by(func.sum(func.abs(Transaction.amount_kopeks)).desc())
         )
+        if campaign_id is not None:
+            by_method_query_sql = by_method_query_sql.join(User, Transaction.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        by_method_query = await db.execute(by_method_query_sql)
         by_method = [
             DepositByMethodItem(method=row.method or 'unknown', count=row.count, amount_kopeks=row.amount)
             for row in by_method_query
         ]
 
-        daily_query = await db.execute(
+        daily_query_sql = (
             select(
                 func.date(Transaction.created_at).label('date'),
                 func.count(Transaction.id).label('count'),
@@ -1208,6 +1506,14 @@ async def get_deposits_stats(
             .group_by(func.date(Transaction.created_at))
             .order_by(func.date(Transaction.created_at))
         )
+        if campaign_id is not None:
+            daily_query_sql = daily_query_sql.join(User, Transaction.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        daily_query = await db.execute(daily_query_sql)
         daily = [
             DailyDepositItem(
                 date=row.date.isoformat() if hasattr(row.date, 'isoformat') else str(row.date),
@@ -1219,7 +1525,7 @@ async def get_deposits_stats(
 
         # Daily deposits grouped by payment method
         # base_filter already excludes NULLs via .in_(methods_with_manual), no coalesce needed
-        daily_by_method_query = await db.execute(
+        daily_by_method_query_sql = (
             select(
                 func.date(Transaction.created_at).label('date'),
                 Transaction.payment_method.label('method'),
@@ -1229,6 +1535,14 @@ async def get_deposits_stats(
             .group_by(func.date(Transaction.created_at), Transaction.payment_method)
             .order_by(func.date(Transaction.created_at), Transaction.payment_method)
         )
+        if campaign_id is not None:
+            daily_by_method_query_sql = daily_by_method_query_sql.join(User, Transaction.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        daily_by_method_query = await db.execute(daily_by_method_query_sql)
         daily_by_method = [
             DailyDepositByMethodItem(
                 date=row.date.isoformat() if hasattr(row.date, 'isoformat') else str(row.date),
@@ -1283,6 +1597,7 @@ async def get_payment_health(
     days: int | None = Query(default=30),
     start_date: str | None = Query(default=None),
     end_date: str | None = Query(default=None),
+    campaign_id: int | None = Query(default=None, description='Filter by campaign ID'),
     admin: User = Depends(require_permission('sales_stats:read')),
     db: AsyncSession = Depends(get_cabinet_db),
 ) -> PaymentHealthResponse:
@@ -1292,6 +1607,9 @@ async def get_payment_health(
     failed_purchases = internal balance rollbacks after a failed/guarded purchase
     (REFUND with no payment_method) — a signal of how often purchases error out,
     NOT money returned to customers.
+
+    Note: Gateway success rates are not filtered by campaign_id as gateway tables
+    (YookassaPayment, LavaPayment, etc.) don't have direct user_id links.
     """
     try:
         period_start, period_end = _parse_period(days, start_date, end_date)
@@ -1301,17 +1619,23 @@ async def get_payment_health(
         total_paid = sum(g['paid'] for g in gateways)
         success_rate = round(total_paid / total_attempts * 100, 1) if total_attempts > 0 else 0.0
 
-        failed_result = await db.execute(
-            select(func.count(Transaction.id)).where(
-                and_(
-                    Transaction.type == TransactionType.REFUND.value,
-                    Transaction.is_completed == True,
-                    Transaction.payment_method.is_(None),
-                    Transaction.created_at >= period_start,
-                    Transaction.created_at <= period_end,
-                )
+        failed_query = select(func.count(Transaction.id)).where(
+            and_(
+                Transaction.type == TransactionType.REFUND.value,
+                Transaction.is_completed == True,
+                Transaction.payment_method.is_(None),
+                Transaction.created_at >= period_start,
+                Transaction.created_at <= period_end,
             )
         )
+        if campaign_id is not None:
+            failed_query = failed_query.join(User, Transaction.user_id == User.id).join(
+                AdvertisingCampaignRegistration,
+                AdvertisingCampaignRegistration.user_id == User.id
+            ).where(
+                AdvertisingCampaignRegistration.campaign_id == campaign_id
+            )
+        failed_result = await db.execute(failed_query)
         failed_purchases = failed_result.scalar() or 0
 
         return PaymentHealthResponse(
