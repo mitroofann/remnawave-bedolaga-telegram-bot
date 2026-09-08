@@ -501,6 +501,25 @@ async def _is_commission_limit_reached(db: AsyncSession, referrer_id: int, refer
     return False
 
 
+def _cap_commission_amount(commission_amount: int) -> int:
+    """[Форк] Ограничивает разовую процентную комиссию потолком REFERRAL_MAX_COMMISSION_KOPEKS.
+
+    Действует только на комиссию с одного пополнения/покупки; фиксированные бонусы
+    (REFERRAL_INVITER_BONUS_KOPEKS и бонус за первое пополнение) не трогает.
+    0 = лимит выключен.
+    """
+    cap = settings.REFERRAL_MAX_COMMISSION_KOPEKS
+    if cap <= 0 or commission_amount <= cap:
+        return commission_amount
+    logger.info(
+        'Комиссия ограничена потолком',
+        original=commission_amount,
+        capped=cap,
+        max_commission_kopeks=cap,
+    )
+    return cap
+
+
 REFERRAL_NOTIFICATION_TYPES = frozenset(
     {
         NotificationType.REFERRAL_BONUS,
@@ -1025,7 +1044,7 @@ async def process_referral_topup(db: AsyncSession, user_id: int, topup_amount_ko
         qualifies_for_first_bonus = topup_amount_kopeks >= settings.REFERRAL_MINIMUM_TOPUP_KOPEKS
         commission_amount = 0
         if commission_percent > 0:
-            commission_amount = int(topup_amount_kopeks * commission_percent / 100)
+            commission_amount = _cap_commission_amount(int(topup_amount_kopeks * commission_percent / 100))
 
         if not user.has_made_first_topup:
             if not qualifies_for_first_bonus:
@@ -1143,7 +1162,7 @@ async def process_referral_topup(db: AsyncSession, user_id: int, topup_amount_ko
                         bonus_kopeks=settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS,
                     )
 
-            commission_amount = int(topup_amount_kopeks * commission_percent / 100)
+            commission_amount = _cap_commission_amount(int(topup_amount_kopeks * commission_percent / 100))
             inviter_bonus = settings.REFERRAL_INVITER_BONUS_KOPEKS + commission_amount
 
             if inviter_bonus > 0:
@@ -1297,7 +1316,7 @@ async def process_referral_purchase(
 
         commission_percent = get_effective_referral_commission_percent(referrer)
 
-        commission_amount = int(purchase_amount_kopeks * commission_percent / 100)
+        commission_amount = _cap_commission_amount(int(purchase_amount_kopeks * commission_percent / 100))
 
         if commission_amount > 0:
             await add_user_balance(
