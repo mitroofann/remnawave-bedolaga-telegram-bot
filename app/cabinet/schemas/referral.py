@@ -147,6 +147,9 @@ class ReferralTermsResponse(BaseModel):
     inviter_bonus_kopeks: int
     inviter_bonus_rubles: float
     max_commission_payments: int = 0
+    # [Форк] Потолок разовой процентной комиссии с одного пополнения реферала.
+    # 0 — лимит выключен. Действует только в legacy-схеме (как и сам бэкенд-лимит).
+    max_commission_kopeks: int = 0
     partner_section_visible: bool = True
     # Под многоуровневой схемой поля выше ничем не управляют: начисления идут по
     # таблице уровней. Публиковать их как «условия программы» значило бы обещать
