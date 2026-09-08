@@ -5,7 +5,9 @@ from typing import Dict
 
 import structlog
 from aiogram import Bot, Dispatcher, types
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
+from aiogram.types import BufferedInputFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +15,47 @@ from app.database.models import MarketingBot
 
 
 logger = structlog.get_logger(__name__)
+
+# Картинка по URL скачивается силами серверов Telegram — если им ссылка
+# недоступна (закрытый хост, самоподписанный сертификат, не-изображение),
+# они отвечают "failed to get HTTP URL content". Тогда бот скачивает картинку
+# сам и шлёт её байтами; если и это не удалось — уходит хотя бы текст.
+IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 15
+MAX_IMAGE_BYTES = 10 * 1024 * 1024  # лимит Telegram для фото
+
+
+async def _download_image(image_url: str) -> bytes | None:
+    """Скачивает картинку для отправки байтов; None при любой неудаче."""
+    import aiohttp
+
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=IMAGE_DOWNLOAD_TIMEOUT_SECONDS)
+        ) as session:
+            async with session.get(image_url) as response:
+                if response.status != 200:
+                    logger.warning(
+                        'Marketing bot image download failed: bad status',
+                        status=response.status,
+                        image_url=image_url,
+                    )
+                    return None
+                data = await response.read()
+                if len(data) > MAX_IMAGE_BYTES:
+                    logger.warning(
+                        'Marketing bot image too large to send',
+                        size=len(data),
+                        image_url=image_url,
+                    )
+                    return None
+                return data
+    except Exception as e:
+        logger.warning(
+            'Marketing bot image download failed',
+            image_url=image_url,
+            error=str(e),
+        )
+        return None
 
 
 class MarketingBotInstance:
@@ -66,12 +109,37 @@ class MarketingBotInstance:
                         reply_markup = keyboard
 
                     if self.image_url:
-                        await message.answer_photo(
-                            photo=self.image_url,
-                            caption=self.welcome_message,
-                            parse_mode='HTML',
-                            reply_markup=reply_markup,
-                        )
+                        try:
+                            await message.answer_photo(
+                                photo=self.image_url,
+                                caption=self.welcome_message,
+                                parse_mode='HTML',
+                                reply_markup=reply_markup,
+                            )
+                        except TelegramBadRequest as e:
+                            # Серверы Telegram не смогли скачать картинку по URL —
+                            # качаем сами и шлём байтами; при неудаче остаётся текст.
+                            logger.warning(
+                                'Marketing bot image URL rejected by Telegram, falling back to upload',
+                                bot_id=self.bot_id,
+                                name=self.name,
+                                image_url=self.image_url,
+                                error=str(e),
+                            )
+                            data = await _download_image(self.image_url)
+                            if data is not None:
+                                await message.answer_photo(
+                                    photo=BufferedInputFile(data, filename='image.jpg'),
+                                    caption=self.welcome_message,
+                                    parse_mode='HTML',
+                                    reply_markup=reply_markup,
+                                )
+                            else:
+                                await message.answer(
+                                    text=self.welcome_message,
+                                    parse_mode='HTML',
+                                    reply_markup=reply_markup,
+                                )
                     else:
                         await message.answer(
                             text=self.welcome_message,
