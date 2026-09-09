@@ -821,17 +821,25 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
                 f'По вашей ссылке зарегистрировался пользователь <b>{html.escape(new_user.full_name)}</b>!\n\n'
                 f'💰 Когда он пополнит баланс от {settings.format_price(settings.REFERRAL_MINIMUM_TOPUP_KOPEKS)}, '
             )
+            # [Форк] Потолок REFERRAL_MAX_COMMISSION_KOPEKS упоминается сразу в
+            # обещании («100% от суммы, но не более X ₽»), чтобы реферер знал
+            # предел заранее, а не удивлялся первой выплате.
+            commission_cap_note = ''
+            if settings.REFERRAL_MAX_COMMISSION_KOPEKS > 0:
+                commission_cap_note = (
+                    f', но не более {settings.format_price(settings.REFERRAL_MAX_COMMISSION_KOPEKS)}'
+                )
             if settings.REFERRAL_INVITER_BONUS_KOPEKS > 0 and commission_percent > 0:
                 inviter_notification += (
                     f'вы получите {settings.format_price(settings.REFERRAL_INVITER_BONUS_KOPEKS)} + '
-                    f'{commission_percent}% от суммы пополнения.\n\n'
+                    f'{commission_percent}% от суммы пополнения{commission_cap_note}.\n\n'
                 )
             elif settings.REFERRAL_INVITER_BONUS_KOPEKS > 0:
                 inviter_notification += (
                     f'вы получите {settings.format_price(settings.REFERRAL_INVITER_BONUS_KOPEKS)}.\n\n'
                 )
             elif commission_percent > 0:
-                inviter_notification += f'вы получите {commission_percent}% от суммы.\n\n'
+                inviter_notification += f'вы получите {commission_percent}% от суммы{commission_cap_note}.\n\n'
             else:
                 inviter_notification += 'вы получите уведомление.\n\n'
             if commission_percent > 0 and settings.REFERRAL_MAX_COMMISSION_PAYMENTS > 1:
@@ -1157,6 +1165,16 @@ async def process_referral_topup(db: AsyncSession, user_id: int, topup_amount_ko
                             f'на {settings.format_price(topup_amount_kopeks)}!\n\n'
                             f'🎁 Ваша награда: {settings.format_price(inviter_bonus)}'
                         )
+                        if settings.REFERRAL_MAX_COMMISSION_KOPEKS > 0 and commission_amount < int(
+                            topup_amount_kopeks * commission_percent / 100
+                        ):
+                            # [Форк] Потолок реально срезал комиссионную часть первой
+                            # выплаты — говорим об этом прямо, чтобы итоговая сумма
+                            # не выглядела ошибкой расчёта.
+                            inviter_bonus_notification += (
+                                f' (комиссия ограничена '
+                                f'{settings.format_price(settings.REFERRAL_MAX_COMMISSION_KOPEKS)})'
+                            )
                         if commission_percent > 0 and settings.REFERRAL_MAX_COMMISSION_PAYMENTS > 1:
                             # [Форк] Фраза про последующие пополнения имеет смысл только при
                             # лимите больше одного (0/1 — молчим: последующих выплат не будет).
