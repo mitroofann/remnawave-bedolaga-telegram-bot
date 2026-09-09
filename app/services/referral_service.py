@@ -835,9 +835,23 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
             else:
                 inviter_notification += 'вы получите уведомление.\n\n'
             if commission_percent > 0:
-                inviter_notification += (
-                    f'📈 С каждого последующего пополнения вы будете получать {commission_percent}% комиссии.'
-                )
+                # [Форк] Фраза про последующие пополнения — с учётом лимита
+                # REFERRAL_MAX_COMMISSION_PAYMENTS (0/1 = фраза не нужна) и
+                # потолка REFERRAL_MAX_COMMISSION_KOPEKS (в рублях).
+                if settings.REFERRAL_MAX_COMMISSION_PAYMENTS > 1:
+                    inviter_notification += (
+                        f'📈 С каждого последующего пополнения вы будете получать {commission_percent}% комиссии '
+                        f'(первые {settings.REFERRAL_MAX_COMMISSION_PAYMENTS} пополнений).\n\n'
+                    )
+                elif settings.REFERRAL_MAX_COMMISSION_KOPEKS > 0:
+                    inviter_notification += (
+                        f'📈 С каждого последующего пополнения вы будете получать {commission_percent}% комиссии, '
+                        f'но не более {settings.format_price(settings.REFERRAL_MAX_COMMISSION_KOPEKS)}.\n\n'
+                    )
+                else:
+                    inviter_notification += (
+                        f'📈 С каждого последующего пополнения вы будете получать {commission_percent}% комиссии.\n\n'
+                    )
             await send_referral_notification(
                 bot,
                 referrer.telegram_id,
@@ -1144,28 +1158,33 @@ async def process_referral_topup(db: AsyncSession, user_id: int, topup_amount_ko
                     )
 
                     if bot:
-                        bonus_parts = []
-                        if settings.REFERRAL_INVITER_BONUS_KOPEKS > 0:
-                            bonus_parts.append(
-                                f'фикс. бонус {settings.format_price(settings.REFERRAL_INVITER_BONUS_KOPEKS)}'
-                            )
-                        if commission_amount > 0:
-                            bonus_parts.append(
-                                f'комиссия {commission_percent}% = {settings.format_price(commission_amount)}'
-                            )
-                        bonus_breakdown = ' + '.join(bonus_parts)
                         inviter_bonus_notification = (
                             f'💰 <b>Реферальная награда!</b>\n\n'
                             f'Ваш реферал <b>{html.escape(user.full_name)}</b> сделал первое пополнение '
                             f'на {settings.format_price(topup_amount_kopeks)}!\n\n'
                             f'🎁 Ваша награда: {settings.format_price(inviter_bonus)}'
-                            f' ({bonus_breakdown})'
                         )
                         if commission_percent > 0:
-                            inviter_bonus_notification += (
-                                f'\n\n📈 Теперь с каждого его пополнения вы будете получать '
-                                f'{commission_percent}% комиссии.'
-                            )
+                            # [Форк] Фраза про последующие пополнения — с учётом лимита
+                            # REFERRAL_MAX_COMMISSION_PAYMENTS (0/1 = фраза не нужна) и
+                            # потолка REFERRAL_MAX_COMMISSION_KOPEKS (в рублях).
+                            if settings.REFERRAL_MAX_COMMISSION_PAYMENTS > 1:
+                                inviter_bonus_notification += (
+                                    f'\n\n📈 Теперь с каждого его пополнения вы будете получать '
+                                    f'{commission_percent}% комиссии '
+                                    f'(первые {settings.REFERRAL_MAX_COMMISSION_PAYMENTS} пополнений).'
+                                )
+                            elif settings.REFERRAL_MAX_COMMISSION_KOPEKS > 0:
+                                inviter_bonus_notification += (
+                                    f'\n\n📈 Теперь с каждого его пополнения вы будете получать '
+                                    f'{commission_percent}% комиссии, '
+                                    f'но не более {settings.format_price(settings.REFERRAL_MAX_COMMISSION_KOPEKS)}.'
+                                )
+                            else:
+                                inviter_bonus_notification += (
+                                    f'\n\n📈 Теперь с каждого его пополнения вы будете получать '
+                                    f'{commission_percent}% комиссии.'
+                                )
                         await send_referral_notification(
                             bot,
                             referrer.telegram_id,
