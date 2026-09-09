@@ -1170,6 +1170,7 @@ async def execute_merge(
     secondary.email_verified_at = None
     secondary.email_verification_token = None
     secondary.email_verification_expires = None
+    secondary.email_verification_return_to = None
     secondary.email_change_new = None
     secondary.email_change_code = None
     secondary.email_change_expires = None

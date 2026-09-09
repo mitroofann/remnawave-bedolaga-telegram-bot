@@ -2273,6 +2273,10 @@ class User(Base):
     password_hash = Column(String(255), nullable=True)
     email_verification_token = Column(String(255), nullable=True)
     email_verification_expires = Column(AwareDateTime(), nullable=True)
+    # Путь возврата после клика по ссылке из письма (сохраняется при регистрации,
+    # потребляется фронтом через параметр return_to в ссылке). Пишется только
+    # валидированное значение (см. _normalize_email_return_to в cabinet/schemas/auth.py).
+    email_verification_return_to = Column(String(512), nullable=True)
     password_reset_token = Column(String(255), nullable=True)
     password_reset_expires = Column(AwareDateTime(), nullable=True)
     cabinet_last_login = Column(AwareDateTime(), nullable=True)

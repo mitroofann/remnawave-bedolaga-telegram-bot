@@ -1,8 +1,22 @@
 """Authentication schemas for cabinet."""
 
+import re
 from datetime import datetime
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
+
+
+def _normalize_email_return_to(value: object) -> str | None:
+    # Единственный источник редиректа в письме — мы сами, поэтому значение
+    # режем до одного шаблона «путь от корня»: без схемы, без домена,
+    # без protocol-relative и без backslash (Windows-трюк мимо `^/`).
+    # Любое отклонение — не ошибка регистрации, а тихий None: фронтенд
+    # просто покажет кабинет после верификации.
+    if not isinstance(value, str):
+        return None
+    if not value or len(value) > 512 or value.startswith('//') or ':' in value or '\\' in value:
+        return None
+    return value if re.fullmatch(r'/[^\s\\]*', value) else None
 
 
 class TelegramAuthRequest(BaseModel):
@@ -79,6 +93,10 @@ class EmailRegisterRequest(BaseModel):
 
     email: EmailStr = Field(..., description='Email address')
     password: str = Field(..., min_length=8, max_length=128, description='Password (min 8 chars)')
+    # Путь в кабинете для возврата после клика по ссылке из письма (см. email_verification_return_to).
+    return_to: str | None = Field(None, max_length=512, description='Return path after email verification')
+
+    _normalize = field_validator('return_to', mode='before')(staticmethod(_normalize_email_return_to))
 
 
 class EmailVerifyRequest(BaseModel):
@@ -188,6 +206,10 @@ class EmailRegisterStandaloneRequest(BaseModel):
             '(см. GET /cabinet/info/legal-consent).'
         ),
     )
+    # Путь в кабинете для возврата после клика по ссылке из письма (см. email_verification_return_to).
+    return_to: str | None = Field(None, max_length=512, description='Return path after email verification')
+
+    _normalize = field_validator('return_to', mode='before')(staticmethod(_normalize_email_return_to))
 
 
 class CampaignBonusInfo(BaseModel):

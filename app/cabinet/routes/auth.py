@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 from datetime import UTC, datetime
+from urllib.parse import quote
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -452,6 +453,19 @@ async def _process_referral_code(
         logger.error('Failed to process referral code', error=e, referral_code=referral_code)
 
 
+def _verification_url_for(user: User) -> str:
+    """Ссылка подтверждения email с сохранённым путём возврата, если он есть.
+
+    return_to кодируем целиком, чтобы `?`/`&` внутри пути (`/buy/x/flow?intent=trial`)
+    не слились с внешним query. Значение попадает сюда только после валидации
+    _normalize_email_return_to — просто путь от корня, open-redirect исключён.
+    """
+    full_url = f'{settings.CABINET_URL}/verify-email?token={user.email_verification_token}'
+    if user.email_verification_return_to:
+        full_url += f'&return_to={quote(user.email_verification_return_to, safe="")}'
+    return full_url
+
+
 async def _issue_verification_email(
     db: AsyncSession,
     user: User,
@@ -482,7 +496,7 @@ async def _issue_verification_email(
         context={
             'username': username or '',
             'email': user.email,
-            'verification_url': f'{verification_url}?token={user.email_verification_token}',
+            'verification_url': _verification_url_for(user),
             'expire_hours': str(expire_hours),
         },
         db=db,
@@ -500,6 +514,7 @@ async def _issue_verification_email(
         language=language,
         custom_subject=custom_subject,
         custom_body_html=custom_body,
+        return_to=user.email_verification_return_to,
     )
     return True
 
@@ -1322,6 +1337,7 @@ async def register_email(
         user.email_verified = False
         user.email_verification_token = verification_token
         user.email_verification_expires = verification_expires
+        user.email_verification_return_to = request.return_to
         await db.commit()
 
         # Send verification email asynchronously (smtplib is blocking)
@@ -1329,7 +1345,7 @@ async def register_email(
             cabinet_url = settings.CABINET_URL
             verification_url = f'{cabinet_url}/verify-email'
             lang = user.language or 'ru'
-            full_url = f'{verification_url}?token={verification_token}'
+            full_url = _verification_url_for(user)
             expire_hours = settings.get_cabinet_email_verification_expire_hours()
 
             # Check for admin template override
@@ -1560,6 +1576,10 @@ async def register_email_standalone(
         language=request.language,
         referred_by_id=referrer.id if referrer else None,
     )
+    # Путь возврата после верификации — кладётся в ту же строку, что и токен
+    # подтверждения, попадает в ссылку письма и очищается при верификации
+    # (как pending_campaign_slug).
+    user.email_verification_return_to = request.return_to
     await legal_consent_service.record_consent(
         db, user, consent_documents, source='cabinet_email', ip_address=client_ip
     )
@@ -1654,6 +1674,7 @@ async def verify_email(
     user.email_verification_source = 'cabinet'
     user.email_verification_token = None
     user.email_verification_expires = None
+    user.email_verification_return_to = None
     user.cabinet_last_login = datetime.now(UTC)
 
     await db.commit()
@@ -2284,7 +2305,7 @@ async def request_email_change(
             cabinet_url = settings.CABINET_URL
             verification_url = f'{cabinet_url}/verify-email'
             lang = user.language or 'ru'
-            full_url = f'{verification_url}?token={verification_token}'
+            full_url = _verification_url_for(user)
             expire_hours = settings.get_cabinet_email_verification_expire_hours()
 
             override = await get_rendered_override(

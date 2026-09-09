@@ -10,6 +10,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr, formatdate, make_msgid
 from typing import Any
+from urllib.parse import quote
 
 import structlog
 
@@ -412,6 +413,7 @@ class EmailService:
         language: str = 'ru',
         custom_subject: str | None = None,
         custom_body_html: str | None = None,
+        return_to: str | None = None,
     ) -> bool:
         """
         Send email verification email.
@@ -424,10 +426,15 @@ class EmailService:
             language: Language code (ru, en, zh, ua, fa)
             custom_subject: Override subject from admin template
             custom_body_html: Override body HTML from admin template (already wrapped in base template)
+            return_to: Optional path for post-verification redirect (already validated;
+                appended urlencoded so `?`/`&` inside the path don't break the link)
 
         Returns:
             True if email was sent successfully, False otherwise
         """
+        full_url = f'{verification_url}?token={verification_token}'
+        if return_to:
+            full_url += f'&return_to={quote(return_to, safe="")}'
         retry_until = datetime.now(tz=UTC) + timedelta(hours=settings.get_cabinet_email_verification_expire_hours())
         if custom_subject and custom_body_html:
             return self.send_email(to_email, custom_subject, custom_body_html, retry_until=retry_until)
@@ -437,7 +444,7 @@ class EmailService:
             language,
             {
                 'username': username or '',
-                'verification_url': f'{verification_url}?token={verification_token}',
+                'verification_url': full_url,
                 'expire_hours': settings.get_cabinet_email_verification_expire_hours(),
             },
         )
