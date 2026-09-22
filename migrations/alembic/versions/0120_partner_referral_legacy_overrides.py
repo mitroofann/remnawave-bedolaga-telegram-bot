@@ -1,6 +1,6 @@
 """Add per-partner legacy referral reward overrides.
 
-Revision ID: 0120_partner_referral_legacy_overrides
+Revision ID: 0120_partner_referral_legacy
 Revises: 0119
 
 [Fork] Partner-scoped legacy reward policy is kept outside system_settings,
@@ -12,7 +12,7 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = '0120_partner_referral_legacy_overrides'
+revision: str = '0120_partner_referral_legacy'
 down_revision: Union[str, None] = '0119'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

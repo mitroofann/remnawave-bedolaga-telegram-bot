@@ -43,6 +43,13 @@ def test_revision_ids_are_unique() -> None:
     assert not duplicates, f'Одинаковые revision id: {duplicates}'
 
 
+def test_revision_ids_fit_alembic_version_column() -> None:
+    revisions = [script.revision for script in _script_directory().walk_revisions()]
+
+    oversized = {revision: len(revision) for revision in revisions if len(revision) > 32}
+    assert not oversized, f'revision id длиннее VARCHAR(32): {oversized}'
+
+
 def test_every_revision_reaches_base() -> None:
     """Разрыв в down_revision оставил бы часть миграций неприменёнными."""
     script = _script_directory()
