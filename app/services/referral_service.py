@@ -15,8 +15,12 @@ from app.services.notification_delivery_service import (
     NotificationType,
     notification_delivery_service,
 )
+from app.services.partner_referral_settings_service import (
+    LegacyReferralSettings,
+    resolve_legacy_referral_settings,
+)
 from app.utils.redis_client import create_redis
-from app.utils.user_utils import get_effective_referral_commission_percent
+from app.utils.user_utils import get_effective_referral_commission_percent  # noqa: F401 — legacy test/API compatibility
 
 
 logger = structlog.get_logger(__name__)
@@ -107,11 +111,16 @@ def _normalize_percent(percent: int | None, fallback: int) -> int:
     return max(0, min(100, int(percent)))
 
 
-def _parse_recurring_commission_tiers(raw_tiers: str | None) -> list[tuple[int, int]]:
+def _parse_recurring_commission_tiers(
+    raw_tiers: str | None,
+    *,
+    fallback_percent: int | None = None,
+) -> list[tuple[int, int]]:
     tiers: list[tuple[int, int]] = []
     if not raw_tiers:
         return tiers
 
+    fallback = settings.REFERRAL_COMMISSION_PERCENT if fallback_percent is None else fallback_percent
     for part in raw_tiers.split(','):
         item = part.strip()
         if not item or ':' not in item:
@@ -119,7 +128,7 @@ def _parse_recurring_commission_tiers(raw_tiers: str | None) -> list[tuple[int, 
         threshold_raw, percent_raw = item.split(':', 1)
         try:
             threshold = max(0, int(threshold_raw.strip()))
-            percent = _normalize_percent(int(percent_raw.strip()), settings.REFERRAL_COMMISSION_PERCENT)
+            percent = _normalize_percent(int(percent_raw.strip()), fallback)
         except ValueError:
             logger.warning('Invalid referral recurring commission tier skipped', tier=item)
             continue
@@ -154,13 +163,24 @@ async def calculate_referral_commission_percent(
     referrer,
     *,
     is_first_payment: bool,
+    legacy_settings: LegacyReferralSettings | None = None,
 ) -> int:
-    base_percent = get_effective_referral_commission_percent(referrer)
+    # [Форк] A resolved snapshot keeps partner policy request-local and avoids
+    # mutating process-global Settings.
+    policy = legacy_settings
+    if policy is None:
+        policy = (
+            await resolve_legacy_referral_settings(db, referrer)
+        ).values
+    base_percent = policy.commission_percent
 
     if is_first_payment:
-        return _normalize_percent(settings.REFERRAL_FIRST_PAYMENT_COMMISSION_PERCENT, base_percent)
+        return _normalize_percent(policy.first_payment_commission_percent, base_percent)
 
-    tiers = _parse_recurring_commission_tiers(settings.REFERRAL_RECURRING_COMMISSION_TIERS)
+    tiers = _parse_recurring_commission_tiers(
+        policy.recurring_commission_tiers,
+        fallback_percent=base_percent,
+    )
     if not tiers:
         return base_percent
 
@@ -484,31 +504,37 @@ async def clear_pending_campaign(telegram_id: int) -> None:
         pass
 
 
-async def _is_commission_limit_reached(db: AsyncSession, referrer_id: int, referral_id: int) -> bool:
-    """Проверяет, исчерпан ли лимит комиссионных платежей для пары реферер-реферал."""
-    if settings.REFERRAL_MAX_COMMISSION_PAYMENTS <= 0:
+async def _is_commission_limit_reached(
+    db: AsyncSession,
+    referrer_id: int,
+    referral_id: int,
+    max_commission_payments: int | None = None,
+) -> bool:
+    """Проверяет лимит комиссионных платежей для пары реферер-реферал."""
+    if max_commission_payments is None:
+        max_commission_payments = settings.REFERRAL_MAX_COMMISSION_PAYMENTS
+    if max_commission_payments <= 0:
         return False
     paid_count = await get_commission_payment_count(db, referrer_id, referral_id)
-    if paid_count >= settings.REFERRAL_MAX_COMMISSION_PAYMENTS:
+    if paid_count >= max_commission_payments:
         logger.info(
             'Лимит комиссионных платежей исчерпан',
             referrer_id=referrer_id,
             referral_id=referral_id,
             paid_count=paid_count,
-            max_payments=settings.REFERRAL_MAX_COMMISSION_PAYMENTS,
+            max_payments=max_commission_payments,
         )
         return True
     return False
 
 
-def _cap_commission_amount(commission_amount: int) -> int:
-    """[Форк] Ограничивает разовую процентную комиссию потолком REFERRAL_MAX_COMMISSION_KOPEKS.
+def _cap_commission_amount(commission_amount: int, max_commission_kopeks: int | None = None) -> int:
+    """[Форк] Ограничивает разовую процентную комиссию потолком.
 
     Действует только на комиссию с одного пополнения/покупки; фиксированные бонусы
-    (REFERRAL_INVITER_BONUS_KOPEKS и бонус за первое пополнение) не трогает.
-    0 = лимит выключен.
+    не трогает. 0 = лимит выключен.
     """
-    cap = settings.REFERRAL_MAX_COMMISSION_KOPEKS
+    cap = settings.REFERRAL_MAX_COMMISSION_KOPEKS if max_commission_kopeks is None else max_commission_kopeks
     if cap <= 0 or commission_amount <= cap:
         return commission_amount
     logger.info(
@@ -756,7 +782,8 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
                 logger.error('Ошибка выдачи наград за регистрацию реферала', error=str(error))
 
         if bot:
-            commission_percent = get_effective_referral_commission_percent(referrer)
+            legacy_policy = (await resolve_legacy_referral_settings(db, referrer)).values
+            commission_percent = legacy_policy.commission_percent
             referral_notification = (
                 f'🎉 <b>Добро пожаловать!</b>\n\n'
                 f'Вы перешли по реферальной ссылке пользователя <b>{html.escape(referrer.full_name)}</b>!'
@@ -769,14 +796,14 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
                 referee_promise = await describe_referee_bonus(db, referrer=referrer) or ''
                 if referee_promise:
                     referral_notification += f'\n\n🎁 Ваш бонус: {referee_promise}!'
-            elif settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS > 0:
+            elif legacy_policy.first_topup_bonus_kopeks > 0:
                 referee_promise = (
-                    f'{settings.format_price(settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS)} при первом пополнении '
-                    f'от {settings.format_price(settings.REFERRAL_MINIMUM_TOPUP_KOPEKS)}'
+                    f'{settings.format_price(legacy_policy.first_topup_bonus_kopeks)} при первом пополнении '
+                    f'от {settings.format_price(legacy_policy.minimum_topup_kopeks)}'
                 )
                 referral_notification += (
-                    f'\n\n💰 При первом пополнении от {settings.format_price(settings.REFERRAL_MINIMUM_TOPUP_KOPEKS)} '
-                    f'вы получите бонус {settings.format_price(settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS)}!'
+                    f'\n\n💰 При первом пополнении от {settings.format_price(legacy_policy.minimum_topup_kopeks)} '
+                    f'вы получите бонус {settings.format_price(legacy_policy.first_topup_bonus_kopeks)}!'
                 )
             await send_referral_notification(
                 bot,
@@ -819,39 +846,39 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
             inviter_notification = (
                 f'👥 <b>Новый реферал!</b>\n\n'
                 f'По вашей ссылке зарегистрировался пользователь <b>{html.escape(new_user.full_name)}</b>!\n\n'
-                f'💰 Когда он пополнит баланс от {settings.format_price(settings.REFERRAL_MINIMUM_TOPUP_KOPEKS)}, '
+                f'💰 Когда он пополнит баланс от {settings.format_price(legacy_policy.minimum_topup_kopeks)}, '
             )
             # [Форк] Потолок REFERRAL_MAX_COMMISSION_KOPEKS упоминается сразу в
             # обещании («100% от суммы, но не более X ₽»), чтобы реферер знал
             # предел заранее, а не удивлялся первой выплате.
             commission_cap_note = ''
-            if settings.REFERRAL_MAX_COMMISSION_KOPEKS > 0:
+            if legacy_policy.max_commission_kopeks > 0:
                 commission_cap_note = (
-                    f', но не более {settings.format_price(settings.REFERRAL_MAX_COMMISSION_KOPEKS)}'
+                    f', но не более {settings.format_price(legacy_policy.max_commission_kopeks)}'
                 )
-            if settings.REFERRAL_INVITER_BONUS_KOPEKS > 0 and commission_percent > 0:
+            if legacy_policy.inviter_bonus_kopeks > 0 and commission_percent > 0:
                 inviter_notification += (
-                    f'вы получите {settings.format_price(settings.REFERRAL_INVITER_BONUS_KOPEKS)} + '
+                    f'вы получите {settings.format_price(legacy_policy.inviter_bonus_kopeks)} + '
                     f'{commission_percent}% от суммы пополнения{commission_cap_note}.\n\n'
                 )
-            elif settings.REFERRAL_INVITER_BONUS_KOPEKS > 0:
+            elif legacy_policy.inviter_bonus_kopeks > 0:
                 inviter_notification += (
-                    f'вы получите {settings.format_price(settings.REFERRAL_INVITER_BONUS_KOPEKS)}.\n\n'
+                    f'вы получите {settings.format_price(legacy_policy.inviter_bonus_kopeks)}.\n\n'
                 )
             elif commission_percent > 0:
                 inviter_notification += f'вы получите {commission_percent}% от суммы{commission_cap_note}.\n\n'
             else:
                 inviter_notification += 'вы получите уведомление.\n\n'
-            if commission_percent > 0 and settings.REFERRAL_MAX_COMMISSION_PAYMENTS > 1:
+            if commission_percent > 0 and legacy_policy.max_commission_payments > 1:
                 # [Форк] Фраза про последующие пополнения имеет смысл только при
                 # лимите больше одного (0/1 — молчим: последующих выплат не будет).
                 # Лимит количества и потолок суммы могут действовать вместе.
                 phrase = (
                     f'📈 С каждого последующего пополнения вы будете получать {commission_percent}% комиссии '
-                    f'(первые {settings.REFERRAL_MAX_COMMISSION_PAYMENTS} пополнений'
+                    f'(первые {legacy_policy.max_commission_payments} пополнений'
                 )
-                if settings.REFERRAL_MAX_COMMISSION_KOPEKS > 0:
-                    phrase += f', но не более {settings.format_price(settings.REFERRAL_MAX_COMMISSION_KOPEKS)}'
+                if legacy_policy.max_commission_kopeks > 0:
+                    phrase += f', но не более {settings.format_price(legacy_policy.max_commission_kopeks)}'
                 inviter_notification += phrase + ').\n\n'
             await send_referral_notification(
                 bot,
@@ -1039,12 +1066,15 @@ async def process_referral_topup(db: AsyncSession, user_id: int, topup_amount_ko
         if settings.is_referral_levels_scheme():
             return await _process_topup_levels(db, user, topup_amount_kopeks, bot)
 
+        # [Форк] Resolve the partner policy once for the whole legacy operation.
+        legacy_policy = (await resolve_legacy_referral_settings(db, referrer)).values
         campaign_id = await get_user_campaign_id(db, user.id)
         prior_reward_payments = await get_referral_reward_payment_count(db, referrer.id, user.id)
         commission_percent = await calculate_referral_commission_percent(
             db,
             referrer,
             is_first_payment=prior_reward_payments == 0,
+            legacy_settings=legacy_policy,
         )
 
         logger.info(
@@ -1056,7 +1086,7 @@ async def process_referral_topup(db: AsyncSession, user_id: int, topup_amount_ko
             commission_percent=commission_percent,
             has_made_first_topup=user.has_made_first_topup,
         )
-        qualifies_for_first_bonus = topup_amount_kopeks >= settings.REFERRAL_MINIMUM_TOPUP_KOPEKS
+        qualifies_for_first_bonus = topup_amount_kopeks >= legacy_policy.minimum_topup_kopeks
 
         # [Форк] Пополнения ниже минимума не приносят рефереру ничего: ни комиссии,
         # ни расхода лимита комиссионных платежей (REFERRAL_MAX_COMMISSION_PAYMENTS).
@@ -1068,13 +1098,16 @@ async def process_referral_topup(db: AsyncSession, user_id: int, topup_amount_ko
                 user_id=user_id,
                 referrer_id=referrer.id,
                 topup_amount_kopeks=topup_amount_kopeks / 100,
-                minimum_topup_kopeks=settings.REFERRAL_MINIMUM_TOPUP_KOPEKS,
+                minimum_topup_kopeks=legacy_policy.minimum_topup_kopeks,
             )
             return True
 
         commission_amount = 0
         if commission_percent > 0:
-            commission_amount = _cap_commission_amount(int(topup_amount_kopeks * commission_percent / 100))
+            commission_amount = _cap_commission_amount(
+                int(topup_amount_kopeks * commission_percent / 100),
+                legacy_policy.max_commission_kopeks,
+            )
 
         if not user.has_made_first_topup:
             user.has_made_first_topup = True
@@ -1093,11 +1126,11 @@ async def process_referral_topup(db: AsyncSession, user_id: int, topup_amount_ko
             except Exception as e:
                 logger.error('Ошибка удаления записи ожидания', error=e)
 
-            if settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS > 0:
+            if legacy_policy.first_topup_bonus_kopeks > 0:
                 bonus_ok = await add_user_balance(
                     db,
                     user,
-                    settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS,
+                    legacy_policy.first_topup_bonus_kopeks,
                     'Бонус за первое пополнение по реферальной программе',
                     transaction_type=TransactionType.REFERRAL_REWARD,
                     bot=bot,
@@ -1106,14 +1139,14 @@ async def process_referral_topup(db: AsyncSession, user_id: int, topup_amount_ko
                     logger.info(
                         '💰 Реферал получил бонус ₽',
                         user_id=user.id,
-                        REFERRAL_FIRST_TOPUP_BONUS_KOPEKS=settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS / 100,
+                        REFERRAL_FIRST_TOPUP_BONUS_KOPEKS=legacy_policy.first_topup_bonus_kopeks / 100,
                     )
 
                     if bot:
                         bonus_notification = (
                             f'🎉 <b>Бонус получен!</b>\n\n'
                             f'За первое пополнение вы получили бонус '
-                            f'{settings.format_price(settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS)}!\n\n'
+                            f'{settings.format_price(legacy_policy.first_topup_bonus_kopeks)}!\n\n'
                             f'💎 Средства зачислены на ваш баланс.'
                         )
                         await send_referral_notification(
@@ -1121,17 +1154,20 @@ async def process_referral_topup(db: AsyncSession, user_id: int, topup_amount_ko
                             user.telegram_id,
                             bonus_notification,
                             user=user,
-                            bonus_kopeks=settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS,
+                            bonus_kopeks=legacy_policy.first_topup_bonus_kopeks,
                         )
                 else:
                     logger.error(
                         'Не удалось начислить бонус за первое пополнение',
                         user_id=user.id,
-                        bonus_kopeks=settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS,
+                        bonus_kopeks=legacy_policy.first_topup_bonus_kopeks,
                     )
 
-            commission_amount = _cap_commission_amount(int(topup_amount_kopeks * commission_percent / 100))
-            inviter_bonus = settings.REFERRAL_INVITER_BONUS_KOPEKS + commission_amount
+            commission_amount = _cap_commission_amount(
+                int(topup_amount_kopeks * commission_percent / 100),
+                legacy_policy.max_commission_kopeks,
+            )
+            inviter_bonus = legacy_policy.inviter_bonus_kopeks + commission_amount
 
             if inviter_bonus > 0:
                 balance_ok = await add_user_balance(
@@ -1165,7 +1201,7 @@ async def process_referral_topup(db: AsyncSession, user_id: int, topup_amount_ko
                             f'на {settings.format_price(topup_amount_kopeks)}!\n\n'
                             f'🎁 Ваша награда: {settings.format_price(inviter_bonus)}'
                         )
-                        if settings.REFERRAL_MAX_COMMISSION_KOPEKS > 0 and commission_amount < int(
+                        if legacy_policy.max_commission_kopeks > 0 and commission_amount < int(
                             topup_amount_kopeks * commission_percent / 100
                         ):
                             # [Форк] Потолок реально срезал комиссионную часть первой
@@ -1173,18 +1209,18 @@ async def process_referral_topup(db: AsyncSession, user_id: int, topup_amount_ko
                             # не выглядела ошибкой расчёта.
                             inviter_bonus_notification += (
                                 f' (комиссия ограничена '
-                                f'{settings.format_price(settings.REFERRAL_MAX_COMMISSION_KOPEKS)})'
+                                f'{settings.format_price(legacy_policy.max_commission_kopeks)})'
                             )
-                        if commission_percent > 0 and settings.REFERRAL_MAX_COMMISSION_PAYMENTS > 1:
+                        if commission_percent > 0 and legacy_policy.max_commission_payments > 1:
                             # [Форк] Фраза про последующие пополнения имеет смысл только при
                             # лимите больше одного (0/1 — молчим: последующих выплат не будет).
                             # Лимит количества и потолок суммы могут действовать вместе.
                             phrase = (
                                 f'\n\n📈 Теперь с каждого его пополнения вы будете получать '
-                                f'{commission_percent}% комиссии (первые {settings.REFERRAL_MAX_COMMISSION_PAYMENTS} пополнений'
+                                f'{commission_percent}% комиссии (первые {legacy_policy.max_commission_payments} пополнений'
                             )
-                            if settings.REFERRAL_MAX_COMMISSION_KOPEKS > 0:
-                                phrase += f', но не более {settings.format_price(settings.REFERRAL_MAX_COMMISSION_KOPEKS)}'
+                            if legacy_policy.max_commission_kopeks > 0:
+                                phrase += f', но не более {settings.format_price(legacy_policy.max_commission_kopeks)}'
                             inviter_bonus_notification += phrase + ').'
                         await send_referral_notification(
                             bot,
@@ -1202,7 +1238,12 @@ async def process_referral_topup(db: AsyncSession, user_id: int, topup_amount_ko
                     )
 
         elif commission_amount > 0:
-            if await _is_commission_limit_reached(db, referrer.id, user.id):
+            if await _is_commission_limit_reached(
+                db,
+                referrer.id,
+                user.id,
+                legacy_policy.max_commission_payments,
+            ):
                 return True
 
             balance_ok = await add_user_balance(
@@ -1287,9 +1328,13 @@ async def process_referral_purchase(
             logger.error('Реферер не найден', referred_by_id=user.referred_by_id)
             return False
 
-        commission_percent = get_effective_referral_commission_percent(referrer)
+        legacy_policy = (await resolve_legacy_referral_settings(db, referrer)).values
+        commission_percent = legacy_policy.commission_percent
 
-        commission_amount = _cap_commission_amount(int(purchase_amount_kopeks * commission_percent / 100))
+        commission_amount = _cap_commission_amount(
+            int(purchase_amount_kopeks * commission_percent / 100),
+            legacy_policy.max_commission_kopeks,
+        )
 
         if commission_amount > 0:
             await add_user_balance(

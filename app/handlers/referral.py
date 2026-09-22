@@ -16,13 +16,13 @@ from app.database.models import User
 from app.keyboards.inline import get_referral_keyboard
 from app.localization.texts import get_texts
 from app.services.admin_notification_service import AdminNotificationService, NotificationCategory
+from app.services.partner_referral_settings_service import resolve_legacy_referral_settings
 from app.services.referral_reward_service import format_reward_total
 from app.services.referral_withdrawal_service import referral_withdrawal_service
 from app.states import ReferralWithdrawalStates
 from app.utils.photo_message import edit_or_answer_photo
 from app.utils.user_utils import (
     get_detailed_referral_list,
-    get_effective_referral_commission_percent,
     get_referral_analytics,
     get_user_referral_summary,
 )
@@ -154,35 +154,36 @@ async def show_referral_info(callback: types.CallbackQuery, db_user: User, db: A
 
         referral_text += '\n\n'
 
-    if not levels_scheme and settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS > 0:
-        referral_text += '\n' + texts.t(
-            'REFERRAL_REWARD_NEW_USER',
-            '• Новый пользователь получает: <b>{bonus}</b> при первом пополнении от <b>{minimum}</b>',
-        ).format(
-            bonus=texts.format_price(settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS),
-            minimum=texts.format_price(settings.REFERRAL_MINIMUM_TOPUP_KOPEKS),
-        )
-
-    if not levels_scheme and settings.REFERRAL_INVITER_BONUS_KOPEKS > 0:
-        referral_text += '\n' + texts.t(
-            'REFERRAL_REWARD_INVITER',
-            '• Вы получаете при первом пополнении реферала: <b>{bonus}</b>',
-        ).format(bonus=texts.format_price(settings.REFERRAL_INVITER_BONUS_KOPEKS))
-
     if not levels_scheme:
-        if settings.REFERRAL_MAX_COMMISSION_PAYMENTS > 0:
+        legacy_policy = (await resolve_legacy_referral_settings(db, db_user)).values
+        if legacy_policy.first_topup_bonus_kopeks > 0:
+            referral_text += '\n' + texts.t(
+                'REFERRAL_REWARD_NEW_USER',
+                '• Новый пользователь получает: <b>{bonus}</b> при первом пополнении от <b>{minimum}</b>',
+            ).format(
+                bonus=texts.format_price(legacy_policy.first_topup_bonus_kopeks),
+                minimum=texts.format_price(legacy_policy.minimum_topup_kopeks),
+            )
+
+        if legacy_policy.inviter_bonus_kopeks > 0:
+            referral_text += '\n' + texts.t(
+                'REFERRAL_REWARD_INVITER',
+                '• Вы получаете при первом пополнении реферала: <b>{bonus}</b>',
+            ).format(bonus=texts.format_price(legacy_policy.inviter_bonus_kopeks))
+
+        if legacy_policy.max_commission_payments > 0:
             commission_line = texts.t(
                 'REFERRAL_REWARD_COMMISSION_LIMITED',
                 '• Комиссия с первых {max_payments} пополнений реферала: <b>{percent}%</b>',
             ).format(
-                percent=get_effective_referral_commission_percent(db_user),
-                max_payments=settings.REFERRAL_MAX_COMMISSION_PAYMENTS,
+                percent=legacy_policy.commission_percent,
+                max_payments=legacy_policy.max_commission_payments,
             )
         else:
             commission_line = texts.t(
                 'REFERRAL_REWARD_COMMISSION',
                 '• Комиссия с каждого пополнения реферала: <b>{percent}%</b>',
-            ).format(percent=get_effective_referral_commission_percent(db_user))
+            ).format(percent=legacy_policy.commission_percent)
 
         referral_text += '\n' + commission_line + '\n\n'
 
@@ -659,14 +660,16 @@ async def create_invite_message(callback: types.CallbackQuery, db_user: User, db
                 'REFERRAL_INVITE_BONUS_LEVELS',
                 '💎 Твой бонус за регистрацию по ссылке: {bonus}',
             ).format(bonus=referee_bonus)
-    elif settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS > 0:
-        bonus_block = '\n\n' + texts.t(
-            'REFERRAL_INVITE_BONUS',
-            '💎 При первом пополнении от {minimum} ты получишь {bonus} бонусом на баланс!',
-        ).format(
-            minimum=texts.format_price(settings.REFERRAL_MINIMUM_TOPUP_KOPEKS),
-            bonus=texts.format_price(settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS),
-        )
+    else:
+        legacy_policy = (await resolve_legacy_referral_settings(db, db_user)).values
+        if legacy_policy.first_topup_bonus_kopeks > 0:
+            bonus_block = '\n\n' + texts.t(
+                'REFERRAL_INVITE_BONUS',
+                '💎 При первом пополнении от {minimum} ты получишь {bonus} бонусом на баланс!',
+            ).format(
+                minimum=texts.format_price(legacy_policy.minimum_topup_kopeks),
+                bonus=texts.format_price(legacy_policy.first_topup_bonus_kopeks),
+            )
 
     # Ссылки оборачиваем в <code>: при тапе по <blockquote> для копирования
     # Telegram сохраняет содержимое <code> в буфере, но ВЫБРАСЫВАЕТ авто-линкнутые

@@ -244,3 +244,27 @@ class AdminUpdateCommissionRequest(BaseModel):
     """Request to update partner commission."""
 
     commission_percent: int = Field(..., ge=1, le=100)
+
+
+class PartnerLegacyReferralOverrides(BaseModel):
+    """Nullable partner overrides; null means inherit the global setting."""
+
+    minimum_topup_kopeks: int | None = Field(None, ge=0)
+    first_topup_bonus_kopeks: int | None = Field(None, ge=0)
+    inviter_bonus_kopeks: int | None = Field(None, ge=0)
+    commission_percent: int | None = Field(None, ge=0, le=100)
+    first_payment_commission_percent: int | None = Field(None, ge=0, le=100)
+    recurring_commission_tiers: str | None = Field(None, max_length=500)
+    max_commission_payments: int | None = Field(None, ge=0)
+    max_commission_kopeks: int | None = Field(None, ge=0)
+
+
+class PartnerLegacyReferralSettingsResponse(BaseModel):
+    """Raw overrides and effective values for one approved partner."""
+
+    user_id: int
+    is_partner: bool
+    partner_status: str
+    overrides: PartnerLegacyReferralOverrides
+    effective: PartnerLegacyReferralOverrides
+    sources: dict[str, str]

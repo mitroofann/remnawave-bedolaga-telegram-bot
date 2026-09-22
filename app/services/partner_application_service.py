@@ -173,6 +173,10 @@ class PartnerApplicationService:
         user.partner_status = PartnerStatus.NONE.value
         user.referral_commission_percent = None
 
+        # [Форк] Partner legacy overrides intentionally survive revocation. The
+        # resolver ignores them while status is not APPROVED, so a later
+        # re-approval restores the partner's saved policy instead of silently
+        # losing admin configuration.
         # Отвязываем все кампании от бывшего партнёра
         await db.execute(
             update(AdvertisingCampaign)

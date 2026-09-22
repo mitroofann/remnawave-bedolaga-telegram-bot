@@ -20,6 +20,7 @@ from app.database.models import (
     WithdrawalRequest,
     WithdrawalRequestStatus,
 )
+from app.services.partner_referral_settings_service import resolve_legacy_referral_settings
 
 from ..dependencies import get_cabinet_db, get_current_cabinet_user, get_optional_cabinet_user
 from ..schemas.referral import (
@@ -76,10 +77,8 @@ async def get_referral_info(
     earnings_result = await db.execute(earnings_query)
     total_earnings, total_earning_days = earnings_result.one()
 
-    # Get user's commission percent
-    commission_percent = user.referral_commission_percent
-    if commission_percent is None:
-        commission_percent = settings.REFERRAL_COMMISSION_PERCENT
+    # [Форк] Resolve the same legacy policy used by future payouts.
+    commission_percent = (await resolve_legacy_referral_settings(db, user)).values.commission_percent
 
     # Get withdrawn amount (approved + completed withdrawal requests)
     withdrawn_query = select(func.coalesce(func.sum(WithdrawalRequest.amount_kopeks), 0)).where(
@@ -425,6 +424,9 @@ async def get_referral_terms(
                 db, user, tariff_names=tariff_names, language=language
             )
 
+    legacy_values = (
+        await resolve_legacy_referral_settings(db, user)
+    ).values if user is not None else None
     return ReferralTermsResponse(
         scheme='levels' if settings.is_referral_levels_scheme() else 'legacy',
         level_descriptions=level_descriptions,
@@ -453,16 +455,34 @@ async def get_referral_terms(
         reward_choice_money=choice_money,
         reward_choice_days=choice_days,
         is_enabled=settings.is_referral_program_enabled(),
-        commission_percent=settings.REFERRAL_COMMISSION_PERCENT,
-        first_payment_commission_percent=settings.REFERRAL_FIRST_PAYMENT_COMMISSION_PERCENT,
-        recurring_commission_tiers=settings.REFERRAL_RECURRING_COMMISSION_TIERS,
-        minimum_topup_kopeks=settings.REFERRAL_MINIMUM_TOPUP_KOPEKS,
-        minimum_topup_rubles=settings.REFERRAL_MINIMUM_TOPUP_KOPEKS / 100,
-        first_topup_bonus_kopeks=settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS,
-        first_topup_bonus_rubles=settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS / 100,
-        inviter_bonus_kopeks=settings.REFERRAL_INVITER_BONUS_KOPEKS,
-        inviter_bonus_rubles=settings.REFERRAL_INVITER_BONUS_KOPEKS / 100,
-        max_commission_payments=settings.REFERRAL_MAX_COMMISSION_PAYMENTS,
-        max_commission_kopeks=settings.REFERRAL_MAX_COMMISSION_KOPEKS,
+        commission_percent=(legacy_values.commission_percent if legacy_values else settings.REFERRAL_COMMISSION_PERCENT),
+        first_payment_commission_percent=(
+            legacy_values.first_payment_commission_percent
+            if legacy_values
+            else settings.REFERRAL_FIRST_PAYMENT_COMMISSION_PERCENT
+        ),
+        recurring_commission_tiers=(
+            legacy_values.recurring_commission_tiers if legacy_values else settings.REFERRAL_RECURRING_COMMISSION_TIERS
+        ),
+        minimum_topup_kopeks=(legacy_values.minimum_topup_kopeks if legacy_values else settings.REFERRAL_MINIMUM_TOPUP_KOPEKS),
+        minimum_topup_rubles=(
+            (legacy_values.minimum_topup_kopeks if legacy_values else settings.REFERRAL_MINIMUM_TOPUP_KOPEKS) / 100
+        ),
+        first_topup_bonus_kopeks=(
+            legacy_values.first_topup_bonus_kopeks if legacy_values else settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS
+        ),
+        first_topup_bonus_rubles=(
+            (legacy_values.first_topup_bonus_kopeks if legacy_values else settings.REFERRAL_FIRST_TOPUP_BONUS_KOPEKS) / 100
+        ),
+        inviter_bonus_kopeks=(legacy_values.inviter_bonus_kopeks if legacy_values else settings.REFERRAL_INVITER_BONUS_KOPEKS),
+        inviter_bonus_rubles=(
+            (legacy_values.inviter_bonus_kopeks if legacy_values else settings.REFERRAL_INVITER_BONUS_KOPEKS) / 100
+        ),
+        max_commission_payments=(
+            legacy_values.max_commission_payments if legacy_values else settings.REFERRAL_MAX_COMMISSION_PAYMENTS
+        ),
+        max_commission_kopeks=(
+            legacy_values.max_commission_kopeks if legacy_values else settings.REFERRAL_MAX_COMMISSION_KOPEKS
+        ),
         partner_section_visible=settings.REFERRAL_PARTNER_SECTION_VISIBLE,
     )

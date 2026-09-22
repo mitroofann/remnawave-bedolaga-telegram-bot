@@ -9,6 +9,7 @@ from app.cabinet.utils.links import get_campaign_deep_link, get_campaign_web_lin
 from app.config import settings
 from app.database.models import AdvertisingCampaign, User
 from app.services.partner_application_service import partner_application_service
+from app.services.partner_referral_settings_service import resolve_legacy_referral_settings
 from app.services.partner_stats_service import PartnerStatsService
 
 from ..dependencies import get_cabinet_db, get_current_cabinet_user
@@ -56,9 +57,9 @@ async def get_partner_status(
             processed_at=latest_app.processed_at,
         )
 
-    commission = user.referral_commission_percent
-    if commission is None and user.is_partner:
-        commission = settings.REFERRAL_COMMISSION_PERCENT
+    commission = None
+    if user.is_partner:
+        commission = (await resolve_legacy_referral_settings(db, user)).values.commission_percent
 
     # Fetch campaigns assigned to this partner
     campaigns: list[PartnerCampaignInfo] = []

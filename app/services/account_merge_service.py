@@ -1,3 +1,4 @@
+import inspect
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -30,6 +31,7 @@ from app.database.models import (
     NewsArticle,
     Pal24Payment,
     PartnerApplication,
+    PartnerReferralLegacyOverride,
     PartnerStatus,
     PinnedMessage,
     PlategaPayment,
@@ -752,6 +754,43 @@ async def execute_merge(
     from app.services.grace_access_runtime import ensure_no_open_grace_for_users
 
     await ensure_no_open_grace_for_users(db, (primary_user_id, secondary_user_id))
+
+    # [Форк] Partner legacy overrides are one-to-one with the owner. Load and
+    # lock both rows before merge mutations so the secondary row can be moved
+    # without leaving a stale row or violating the unique owner constraint.
+    override_result = await db.execute(
+        select(PartnerReferralLegacyOverride)
+        .where(PartnerReferralLegacyOverride.partner_user_id.in_((primary.id, secondary.id)))
+        .with_for_update()
+    )
+    override_scalars = override_result.scalars()
+    if inspect.isawaitable(override_scalars):
+        override_scalars = await override_scalars
+    override_rows = override_scalars.all()
+    if inspect.isawaitable(override_rows):
+        override_rows = await override_rows
+    partner_overrides = {row.partner_user_id: row for row in override_rows}
+    primary_override = partner_overrides.get(primary.id)
+    secondary_override = partner_overrides.get(secondary.id)
+
+    if primary_override is None and secondary_override is not None:
+        secondary_override.partner_user_id = primary.id
+        primary_override = secondary_override
+        logger.info(
+            'Перенесены персональные legacy-настройки партнёра при мерже',
+            primary_id=primary.id,
+            secondary_id=secondary.id,
+        )
+    elif primary_override is not None and secondary_override is not None:
+        await db.delete(secondary_override)
+        logger.warning(
+            'Конфликт персональных legacy-настроек при мерже: сохранены настройки primary',
+            primary_id=primary.id,
+            secondary_id=secondary.id,
+        )
+
+    if secondary_override is not None:
+        await db.flush()
 
     oauth_transfers: list[tuple[str, object]] = []
     for field in _OAUTH_FIELDS:

@@ -22,6 +22,7 @@ from app.database.crud.referral_reward_level import (
 from app.database.models import (
     AdvertisingCampaign,
     PartnerApplication,
+    PartnerReferralLegacyOverride,
     PartnerStatus,
     ReferralEarning,
     ReferralRewardMode,
@@ -30,6 +31,7 @@ from app.database.models import (
     User,
 )
 from app.services.partner_application_service import partner_application_service
+from app.services.partner_referral_settings_service import resolve_legacy_referral_settings
 from app.services.partner_stats_service import PartnerStatsService
 from app.services.system_settings_service import bot_configuration_service
 
@@ -44,6 +46,8 @@ from ..schemas.partners import (
     AdminRejectRequest,
     AdminUpdateCommissionRequest,
     CampaignSummary,
+    PartnerLegacyReferralOverrides,
+    PartnerLegacyReferralSettingsResponse,
 )
 from ..schemas.referral import (
     ReferralDepthUpdateRequest,
@@ -639,6 +643,95 @@ async def update_referral_scheme(
     await bot_configuration_service.set_value(db, 'REFERRAL_REWARD_SCHEME', scheme)
     logger.info('Схема реферальных наград переключена из кабинета', admin_id=admin.id, scheme=scheme)
     return await _levels_payload(db)
+
+
+def _legacy_settings_response(user: User, resolved) -> PartnerLegacyReferralSettingsResponse:
+    values = resolved.values
+    effective = PartnerLegacyReferralOverrides(
+        minimum_topup_kopeks=values.minimum_topup_kopeks,
+        first_topup_bonus_kopeks=values.first_topup_bonus_kopeks,
+        inviter_bonus_kopeks=values.inviter_bonus_kopeks,
+        commission_percent=values.commission_percent,
+        first_payment_commission_percent=values.first_payment_commission_percent,
+        recurring_commission_tiers=values.recurring_commission_tiers,
+        max_commission_payments=values.max_commission_payments,
+        max_commission_kopeks=values.max_commission_kopeks,
+    )
+    return PartnerLegacyReferralSettingsResponse(
+        user_id=user.id,
+        is_partner=user.is_partner,
+        partner_status=user.partner_status,
+        overrides=PartnerLegacyReferralOverrides(**resolved.overrides),
+        effective=effective,
+        sources=resolved.sources,
+    )
+
+
+@router.get('/{user_id}/legacy-referral-settings', response_model=PartnerLegacyReferralSettingsResponse)
+async def get_legacy_referral_settings(
+    user_id: int,
+    admin: User = Depends(require_permission('partners:read')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Пользователь не найден')
+    if not user.is_partner:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Пользователь не является одобренным партнёром')
+    resolved = await resolve_legacy_referral_settings(db, user)
+    return _legacy_settings_response(user, resolved)
+
+
+@router.patch('/{user_id}/legacy-referral-settings', response_model=PartnerLegacyReferralSettingsResponse)
+async def update_legacy_referral_settings(
+    user_id: int,
+    request: PartnerLegacyReferralOverrides,
+    admin: User = Depends(require_permission('partners:edit')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Пользователь не найден')
+    if not user.is_partner:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Пользователь не является одобренным партнёром')
+
+    result = await db.execute(
+        select(PartnerReferralLegacyOverride).where(PartnerReferralLegacyOverride.partner_user_id == user_id)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = PartnerReferralLegacyOverride(partner_user_id=user_id)
+        db.add(row)
+
+    for field in request.model_fields_set:
+        setattr(row, field, getattr(request, field))
+    await db.commit()
+    await db.refresh(user)
+    resolved = await resolve_legacy_referral_settings(db, user)
+    logger.info('Персональные legacy-настройки партнёра обновлены', user_id=user_id, admin_id=admin.id)
+    return _legacy_settings_response(user, resolved)
+
+
+@router.delete('/{user_id}/legacy-referral-settings', response_model=PartnerLegacyReferralSettingsResponse)
+async def reset_legacy_referral_settings(
+    user_id: int,
+    admin: User = Depends(require_permission('partners:edit')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Пользователь не найден')
+    if not user.is_partner:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Пользователь не является одобренным партнёром')
+    row_result = await db.execute(
+        select(PartnerReferralLegacyOverride).where(PartnerReferralLegacyOverride.partner_user_id == user_id)
+    )
+    row = row_result.scalar_one_or_none()
+    if row is not None:
+        await db.delete(row)
+        await db.commit()
+    resolved = await resolve_legacy_referral_settings(db, user)
+    return _legacy_settings_response(user, resolved)
 
 
 # ВНИМАНИЕ: всё, что ниже, объявлено ПОСЛЕ параметризованных путей вида

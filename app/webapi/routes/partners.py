@@ -15,12 +15,10 @@ from app.database.crud.user import (
     update_user,
 )
 from app.database.models import User
+from app.services.partner_referral_settings_service import resolve_legacy_referral_settings
 from app.services.partner_stats_service import PartnerStatsService
 from app.utils.text_search import contains_conditions
-from app.utils.user_utils import (
-    get_detailed_referral_list,
-    get_effective_referral_commission_percent,
-)
+from app.utils.user_utils import get_detailed_referral_list
 
 from ..dependencies import get_db_session, require_api_token
 from ..schemas.partners import (
@@ -73,8 +71,11 @@ def _apply_search_filter(query, search: str):
     return query.where(or_(*conditions))
 
 
-def _serialize_referrer(user: User, stats: dict) -> PartnerReferrerItem:
+async def _serialize_referrer(db: AsyncSession, user: User, stats: dict) -> PartnerReferrerItem:
     total_earned_kopeks = int(stats.get('total_earned_kopeks') or 0)
+    effective_percent = (
+        await resolve_legacy_referral_settings(db, user)
+    ).values.commission_percent
     month_earned_kopeks = int(stats.get('month_earned_kopeks') or 0)
 
     return PartnerReferrerItem(
@@ -85,7 +86,7 @@ def _serialize_referrer(user: User, stats: dict) -> PartnerReferrerItem:
         last_name=user.last_name,
         referral_code=user.referral_code,
         referral_commission_percent=getattr(user, 'referral_commission_percent', None),
-        effective_referral_commission_percent=get_effective_referral_commission_percent(user),
+        effective_referral_commission_percent=effective_percent,
         invited_count=int(stats.get('invited_count') or 0),
         active_referrals=int(stats.get('active_referrals') or 0),
         total_earned_kopeks=total_earned_kopeks,
@@ -151,7 +152,7 @@ async def list_referrers(
     items: list[PartnerReferrerItem] = []
     for referrer in referrers:
         stats = await get_user_referral_stats(db, referrer.id)
-        items.append(_serialize_referrer(referrer, stats))
+        items.append(await _serialize_referrer(db, referrer, stats))
 
     return PartnerReferrerListResponse(
         items=items,
@@ -177,7 +178,7 @@ async def get_referrer_detail(
         raise HTTPException(status.HTTP_404_NOT_FOUND, 'User not found')
 
     stats = await get_user_referral_stats(db, user.id)
-    referrer_item = _serialize_referrer(user, stats)
+    referrer_item = await _serialize_referrer(db, user, stats)
 
     referrals_data = await get_detailed_referral_list(db, user.id, limit=limit, offset=offset)
     referral_items = [_serialize_referral_item(referral) for referral in referrals_data.get('referrals', [])]

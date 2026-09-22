@@ -3256,8 +3256,39 @@ class WithdrawalRequest(Base):
         return self.amount_kopeks / 100
 
 
+class PartnerReferralLegacyOverride(Base):
+    """Per-partner overrides for the legacy referral reward policy.
+
+    ``NULL`` means inherit the global ``REFERRAL_*`` setting. This table is
+    deliberately separate from ``system_settings``: the latter is global and
+    is also exposed as the process-wide Settings registry.
+    """
+
+    __tablename__ = 'partner_referral_legacy_overrides'
+    __table_args__ = (
+        UniqueConstraint('partner_user_id', name='uq_partner_referral_legacy_override_user'),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    partner_user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+
+    minimum_topup_kopeks = Column(Integer, nullable=True)
+    first_topup_bonus_kopeks = Column(Integer, nullable=True)
+    inviter_bonus_kopeks = Column(Integer, nullable=True)
+    commission_percent = Column(Integer, nullable=True)
+    first_payment_commission_percent = Column(Integer, nullable=True)
+    recurring_commission_tiers = Column(Text, nullable=True)
+    max_commission_payments = Column(Integer, nullable=True)
+    max_commission_kopeks = Column(Integer, nullable=True)
+
+    created_at = Column(AwareDateTime(), default=func.now())
+    updated_at = Column(AwareDateTime(), default=func.now(), onupdate=func.now())
+
+    partner = relationship('User', foreign_keys=[partner_user_id])
+
+
 class PartnerApplication(Base):
-    """Заявка на получение статуса партнёра."""
+    """Заявка на получение партнёрского статуса."""
 
     __tablename__ = 'partner_applications'
 
