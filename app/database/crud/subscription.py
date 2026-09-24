@@ -185,6 +185,8 @@ async def create_trial_subscription(
     squad_uuid: str = None,
     connected_squads: list[str] = None,
     tariff_id: int | None = None,
+    commit: bool = True,
+    source_guest_purchase_id: int | None = None,
 ) -> Subscription:
     """Создает триальную подписку.
 
@@ -244,9 +246,14 @@ async def create_trial_subscription(
         existing.device_limit = device_limit
         existing.connected_squads = final_squads
         existing.tariff_id = tariff_id
+        if source_guest_purchase_id is not None:
+            existing.source_guest_purchase_id = source_guest_purchase_id
         if not existing.remnawave_short_id:
             existing.remnawave_short_id = await generate_unique_short_id(db)
-        await db.commit()
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
         await db.refresh(existing)
         logger.info(
             '🎁 Обновлена PENDING триальная подписка для пользователя', existing_id=existing.id, user_id=user_id
@@ -286,12 +293,16 @@ async def create_trial_subscription(
         autopay_enabled=False,
         autopay_days_before=settings.DEFAULT_AUTOPAY_DAYS_BEFORE,
         tariff_id=tariff_id,
+        source_guest_purchase_id=source_guest_purchase_id,
         remnawave_short_id=short_id,
     )
 
     db.add(subscription)
     try:
-        await db.commit()
+        if commit:
+            await db.commit()
+        else:
+            await db.flush()
     except IntegrityError as exc:
         # Всегда откатываем транзакцию и убираем объект из сессии — независимо от
         # причины ошибки, сессию нельзя оставлять в broken-состоянии.

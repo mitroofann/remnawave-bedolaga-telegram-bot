@@ -2656,6 +2656,14 @@ class MonitoringService:
             )
 
     async def _retry_stuck_guest_purchases(self, db: AsyncSession):
+        from app.services.landing_bulka_flow_service import retry_stuck_bulka_free_trials
+        try:
+            retried_free = await retry_stuck_bulka_free_trials(db)
+            if retried_free:
+                logger.info('Retried Bulka free trials', retried=retried_free)
+        except Exception:
+            logger.error('Error retrying Bulka free trials', exc_info=True)
+
         from app.services.guest_purchase_service import (
             recover_stuck_pending_purchases,
             retry_stuck_paid_purchases,

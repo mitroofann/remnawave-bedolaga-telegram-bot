@@ -12,7 +12,11 @@ from app.cabinet.ip_utils import get_client_ip
 from app.database.crud.landing import get_active_landing_by_slug
 from app.database.models import User
 from app.services.guest_purchase_service import GuestPurchaseError
-from app.services.landing_bulka_flow_service import build_bulka_flow_config, create_bulka_purchase
+from app.services.landing_bulka_flow_service import (
+    build_bulka_flow_config,
+    create_bulka_free_trial,
+    create_bulka_purchase,
+)
 from app.utils.cache import RateLimitCache
 
 
@@ -49,6 +53,18 @@ class BulkaPurchaseResponse(BaseModel):
     landing_template: Literal['bulka_sales_flow']
 
 
+class BulkaFreeTrialRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    language: str | None = Field(default=None, max_length=5)
+    referrer: str | None = Field(default=None, max_length=500)
+    subid: str | None = Field(default=None, max_length=255)
+
+
+class BulkaFreeTrialResponse(BaseModel):
+    purchase_token: str
+
+
 def _raise(error: GuestPurchaseError) -> None:
     detail = {'code': getattr(error, 'code', 'bulka_flow_error'), 'message': error.message}
     raise HTTPException(status_code=error.status_code, detail=detail) from error
@@ -70,6 +86,37 @@ async def get_bulka_flow(
         return await build_bulka_flow_config(db, landing, user)
     except GuestPurchaseError as exc:
         _raise(exc)
+
+
+@router.post('/{slug}/bulka-flow/free-trial', response_model=BulkaFreeTrialResponse)
+async def create_bulka_flow_free_trial(
+    body: BulkaFreeTrialRequest,
+    raw_request: Request,
+    slug: str = Path(max_length=100),
+    idempotency_key: UUID = Header(alias='Idempotency-Key'),
+    user: User = Depends(get_current_cabinet_user),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Claim one server-authorized free Bulka trial without payment."""
+    client_ip = get_client_ip(raw_request)
+    if await RateLimitCache.is_ip_rate_limited(client_ip, 'bulka_flow_free_trial', limit=10, window=60, fail_closed=True):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail='Too many free trial attempts, please try again later'
+        )
+    try:
+        landing = await get_active_landing_by_slug(db, slug)
+        result = await create_bulka_free_trial(
+            db,
+            landing=landing,
+            user=user,
+            idempotency_key=str(idempotency_key),
+            language=body.language,
+            referrer=body.referrer,
+            subid=body.subid,
+        )
+    except GuestPurchaseError as exc:
+        _raise(exc)
+    return BulkaFreeTrialResponse(purchase_token=result.purchase.token)
 
 
 @router.post('/{slug}/bulka-flow/purchase', response_model=BulkaPurchaseResponse)

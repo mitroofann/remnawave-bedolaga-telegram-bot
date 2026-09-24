@@ -2490,6 +2490,14 @@ class Subscription(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    # Optional durable link to the authenticated Bulka free-trial claim. This is
+    # deliberately nullable so all existing subscription creation paths remain unchanged.
+    source_guest_purchase_id = Column(
+        Integer,
+        ForeignKey('guest_purchases.id', ondelete='SET NULL'),
+        nullable=True,
+        unique=True,
+    )
 
     status = Column(String(20), default=SubscriptionStatus.TRIAL.value)
     is_trial = Column(Boolean, default=True)
@@ -4874,6 +4882,13 @@ class GuestPurchase(Base):
             name='chk_guest_purchase_flow_kind',
         ),
         Index('ux_guest_purchases_idempotency_key', 'idempotency_key', unique=True),
+        Index(
+            'uq_guest_purchases_bulka_free_user',
+            'buyer_user_id',
+            unique=True,
+            postgresql_where=text('is_bulka_free_trial IS TRUE'),
+            sqlite_where=text('is_bulka_free_trial IS TRUE'),
+        ),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -4885,7 +4900,7 @@ class GuestPurchase(Base):
     flow_kind = Column(String(20), nullable=True)  # 'trial' | 'purchase'
     selected_tariff_id = Column(Integer, nullable=True)
     selected_period_days = Column(Integer, nullable=True)
-    idempotency_key = Column(String(36), nullable=True)
+    idempotency_key = Column(String(64), nullable=True)
     idempotency_payload_hash = Column(String(64), nullable=True)
     payment_url = Column(Text, nullable=True)
     flow_return_kind = Column(String(50), nullable=True)
@@ -4897,6 +4912,15 @@ class GuestPurchase(Base):
     # Покупка является активацией триала через лендинг-воронку (изолированная фича форка).
     # При True в fulfill_purchase выдаётся trial-подписка вместо платной.
     is_trial = Column(Boolean, nullable=False, default=False, server_default=text('false'))
+    # Authenticated Bulka free trial claim. Kept separate from is_trial because the
+    # paid trial flow also uses that flag and must retain its existing semantics.
+    is_bulka_free_trial = Column(Boolean, nullable=False, default=False, server_default=text('false'))
+    # Free claims use pending_activation while the panel is not ready; this marker
+    # prevents generic paid activation/recovery code from touching them.
+    activation_kind = Column(String(32), nullable=True)
+    activation_lease_id = Column(String(36), nullable=True)
+    activation_lease_until = Column(AwareDateTime(), nullable=True)
+    activation_attempts = Column(Integer, nullable=False, default=0, server_default='0')
     source = Column(
         String(20), nullable=False, default='landing', server_default='landing'
     )  # 'landing', 'cabinet', 'bot'
@@ -4931,10 +4955,6 @@ class GuestPurchase(Base):
     # Оплату подтверждает вебхук платёжки, где куки и сессии покупателя уже
     # нет, поэтому источник атрибуции хранится в самой покупке.
     campaign_slug = Column(String(64), nullable=True)
-    # Идемпотентность покупки (checkout id / idempotency key). Уникальный
-    # индекс ux_guest_purchases_idempotency_key предотвращает повторные списания.
-    idempotency_key = Column(String(64), nullable=True)
-
     landing = relationship('LandingPage', back_populates='guest_purchases', lazy='selectin')
     tariff = relationship('Tariff', lazy='selectin')
     user = relationship('User', foreign_keys=[user_id], lazy='selectin')

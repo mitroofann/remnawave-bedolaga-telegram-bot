@@ -230,6 +230,7 @@ class PurchaseStatusResponse(BaseModel):
     flow_return_kind: str | None = None
     activated_at: datetime | None = None
     subscription_id: int | None = None
+    activation_kind: str | None = None
     gift_code: str | None = None
     bot_claim_url: str | None = None
     cabinet_claim_url: str | None = None
@@ -392,7 +393,12 @@ def _build_purchase_status_response(purchase: GuestPurchase) -> PurchaseStatusRe
         flow_kind=purchase.flow_kind,
         flow_return_kind=purchase.flow_return_kind,
         activated_at=purchase.activated_at,
-        subscription_id=purchase.subscription_id,
+        subscription_id=(
+            purchase.subscription_id
+            if purchase.status == GuestPurchaseStatus.DELIVERED.value or not purchase.is_bulka_free_trial
+            else None
+        ),
+        activation_kind=purchase.activation_kind,
         gift_code=gift_code,
         bot_claim_url=bot_claim_url,
         cabinet_claim_url=cabinet_claim_url,
@@ -591,6 +597,8 @@ async def activate_purchase(
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail='Too many requests')
 
     try:
+        # The service locks and reloads the purchase. Avoid an extra query here so
+        # lightweight route tests and the existing activation transaction stay intact.
         purchase = await activate_guest_purchase(db, token)
     except GuestPurchaseError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc

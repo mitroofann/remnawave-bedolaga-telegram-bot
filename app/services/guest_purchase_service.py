@@ -1513,6 +1513,8 @@ async def activate_purchase(db: AsyncSession, purchase_token: str, *, skip_notif
 
     if purchase.status != GuestPurchaseStatus.PENDING_ACTIVATION.value:
         raise GuestPurchaseError('Purchase is not pending activation', status_code=400)
+    if getattr(purchase, 'is_bulka_free_trial', False):
+        raise GuestPurchaseError('Free Bulka trial activation is automatic', status_code=409)
 
     tariff = await get_tariff_by_id(db, purchase.tariff_id)
     if tariff is None:
@@ -1815,6 +1817,7 @@ async def retry_stuck_pending_activation(
             or_(GuestPurchase.paid_at < cutoff, GuestPurchase.paid_at.is_(None)),
             or_(GuestPurchase.paid_at > max_age, GuestPurchase.paid_at.is_(None)),
             GuestPurchase.user_id.isnot(None),
+            GuestPurchase.is_bulka_free_trial.is_(False),
         )
         .order_by(GuestPurchase.paid_at.asc().nulls_first())
         .limit(limit)
@@ -1867,6 +1870,7 @@ async def _fail_exhausted_purchases_batch(
             GuestPurchase.status == status.value,
             GuestPurchase.retry_count >= max_retries,
             or_(GuestPurchase.paid_at > max_age, GuestPurchase.paid_at.is_(None)),
+            GuestPurchase.is_bulka_free_trial.is_(False),
         )
         .limit(10)
     )

@@ -6,16 +6,20 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
+from uuid import uuid4
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.database.crud.landing import create_guest_purchase, get_bulka_purchase_by_idempotency_key
+from app.database.crud.landing import (
+    create_guest_purchase,
+    get_bulka_purchase_by_idempotency_key,
+)
 from app.database.crud.subscription import (
     create_paid_subscription,
     create_trial_subscription,
@@ -28,6 +32,7 @@ from app.database.models import (
     GuestPurchase,
     GuestPurchaseStatus,
     LandingPage,
+    Subscription,
     Transaction,
     TransactionType,
     User,
@@ -55,6 +60,15 @@ class BulkaPurchaseResult:
     payment_url: str
 
 
+@dataclass(slots=True)
+class BulkaFreeTrialResult:
+    purchase: GuestPurchase
+
+
+_FREE_TRIAL_ACTIVATION_KIND = 'free_trial'
+_FREE_TRIAL_LEASE_SECONDS = 30
+
+
 def _error(code: str, message: str, status_code: int = 400) -> GuestPurchaseError:
     error = GuestPurchaseError(message, status_code)
     error.code = code  # type: ignore[attr-defined]
@@ -63,6 +77,8 @@ def _error(code: str, message: str, status_code: int = 400) -> GuestPurchaseErro
 
 def _assert_bulka_landing(landing: LandingPage | None) -> LandingPage:
     if landing is None:
+        raise _error('landing_not_found', 'Landing page not found', 404)
+    if not getattr(landing, 'is_active', True):
         raise _error('landing_not_found', 'Landing page not found', 404)
     if landing.template != _TEMPLATE:
         raise _error('unsupported_landing_template', 'This landing does not support Bulka flow', 409)
@@ -106,6 +122,63 @@ async def _assert_trial_eligible(db: AsyncSession, landing: LandingPage, user: U
     await db.refresh(user, ['subscriptions'])
     if user.is_trial_already_used():
         raise _error('trial_already_used', 'Trial already used', 409)
+
+
+async def _lock_user(db: AsyncSession, user_id: int) -> User:
+    result = await db.execute(select(User).where(User.id == user_id).with_for_update())
+    locked = result.scalars().first()
+    if locked is None:
+        raise _error('user_not_found', 'User not found', 404)
+    await db.refresh(locked, ['subscriptions'])
+    return locked
+
+
+async def _assert_free_trial_configuration(db: AsyncSession, landing: LandingPage) -> None:
+    if not is_landing_trial_globally_enabled() or not landing.trial_enabled:
+        raise _error('trial_unavailable', 'Trial is not enabled for this landing', 409)
+    params = await resolve_landing_trial_params(db)
+    if params.requires_payment or params.price_kopeks != 0:
+        raise _error('trial_requires_payment', 'This trial requires payment', 409)
+    if params.tariff_id is None or params.duration_days <= 0:
+        raise _error('trial_configuration_invalid', 'Free trial is not configured', 500)
+    if await get_tariff_by_id(db, params.tariff_id) is None:
+        raise _error('trial_tariff_missing', 'Trial tariff is not configured', 500)
+
+
+async def _get_free_trial_claim(
+    db: AsyncSession, *, user_id: int, landing_id: int, idempotency_key: str, lock: bool = False
+) -> GuestPurchase | None:
+    statement = select(GuestPurchase).where(
+        GuestPurchase.buyer_user_id == user_id,
+        GuestPurchase.landing_id == landing_id,
+        GuestPurchase.idempotency_key == idempotency_key,
+        GuestPurchase.is_bulka_free_trial.is_(True),
+    )
+    if lock:
+        statement = statement.with_for_update()
+    result = await db.execute(statement)
+    return result.scalars().first()
+
+
+async def _claim_free_trial_lease(db: AsyncSession, purchase_id: int) -> str | None:
+    now = datetime.now(UTC)
+    lease_id = str(uuid4())
+    result = await db.execute(
+        update(GuestPurchase)
+        .where(
+            GuestPurchase.id == purchase_id,
+            GuestPurchase.is_bulka_free_trial.is_(True),
+            GuestPurchase.status == GuestPurchaseStatus.PENDING_ACTIVATION.value,
+            (GuestPurchase.activation_lease_until.is_(None) | (GuestPurchase.activation_lease_until <= now)),
+        )
+        .values(
+            activation_lease_id=lease_id,
+            activation_lease_until=now + timedelta(seconds=_FREE_TRIAL_LEASE_SECONDS),
+            activation_attempts=GuestPurchase.activation_attempts + 1,
+        )
+    )
+    await db.commit()
+    return lease_id if result.rowcount == 1 else None
 
 
 async def build_bulka_flow_config(db: AsyncSession, landing: LandingPage, user: User) -> dict:
@@ -201,6 +274,195 @@ async def build_bulka_flow_config(db: AsyncSession, landing: LandingPage, user: 
         'tariffs': tariffs,
         'payment_methods': methods,
     }
+
+
+async def create_bulka_free_trial(
+    db: AsyncSession,
+    *,
+    landing: LandingPage,
+    user: User,
+    idempotency_key: str,
+    language: str | None = None,
+    referrer: str | None = None,
+    subid: str | None = None,
+) -> BulkaFreeTrialResult:
+    """Reserve and provision one authenticated, zero-price Bulka trial.
+
+    The purchase row is the durable claim. Admission is serialized by the user row
+    and the partial unique claim index protects the invariant after this transaction
+    releases its lock. Provisioning is resumed from the stored subscription id.
+    """
+    _assert_bulka_landing(landing)
+    request_payload = {
+        'landing_slug': landing.slug,
+        'language': language,
+        'referrer': referrer,
+        'subid': subid,
+    }
+    fingerprint = _payload_hash(request_payload)
+
+    existing = await _get_free_trial_claim(
+        db, user_id=user.id, landing_id=landing.id, idempotency_key=idempotency_key, lock=True
+    )
+    if existing:
+        if existing.idempotency_payload_hash != fingerprint:
+            raise _error(
+                'idempotency_payload_mismatch', 'Idempotency-Key was already used with a different request', 409
+            )
+        if existing.status == GuestPurchaseStatus.DELIVERED.value:
+            return BulkaFreeTrialResult(existing)
+        await _resume_free_trial(db, existing)
+        await db.refresh(existing)
+        return BulkaFreeTrialResult(existing)
+
+    locked_user = await _lock_user(db, user.id)
+    await db.refresh(landing)
+    _assert_bulka_landing(landing)
+    await _assert_free_trial_configuration(db, landing)
+    await _assert_trial_eligible(db, landing, locked_user)
+    if any(subscription.is_pending_trial for subscription in locked_user.subscriptions or []):
+        raise _error('trial_claim_exists', 'Finish the existing trial checkout before claiming a free trial', 409)
+    params = await resolve_landing_trial_params(db)
+    tariff = await get_tariff_by_id(db, params.tariff_id)
+    if tariff is None:
+        raise _error('trial_tariff_missing', 'Trial tariff is not configured', 500)
+
+    contact_type, contact_value = _contact_for_user(locked_user)
+    try:
+        purchase = await create_guest_purchase(
+            db,
+            commit=False,
+            landing_id=landing.id,
+            landing_slug=landing.slug,
+            landing_template=_TEMPLATE,
+            flow_kind='trial',
+            selected_tariff_id=tariff.id,
+            selected_period_days=params.duration_days,
+            idempotency_key=idempotency_key,
+            idempotency_payload_hash=fingerprint,
+            flow_return_kind='bulka_connect',
+            tariff_id=tariff.id,
+            period_days=params.duration_days,
+            amount_kopeks=0,
+            contact_type=contact_type,
+            contact_value=contact_value,
+            source='landing',
+            buyer_user_id=locked_user.id,
+            user_id=locked_user.id,
+            status=GuestPurchaseStatus.PENDING_ACTIVATION.value,
+            is_trial=True,
+            is_bulka_free_trial=True,
+            activation_kind=_FREE_TRIAL_ACTIVATION_KIND,
+            subid=subid,
+            referrer=referrer,
+        )
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        winner = await _get_free_trial_claim(
+            db, user_id=user.id, landing_id=landing.id, idempotency_key=idempotency_key
+        )
+        if winner and winner.idempotency_payload_hash == fingerprint:
+            await _resume_free_trial(db, winner)
+            return BulkaFreeTrialResult(winner)
+        raise _error('trial_claim_exists', 'A free trial has already been claimed', 409)
+
+    subscription = await create_trial_subscription(
+        db=db,
+        user_id=locked_user.id,
+        duration_days=params.duration_days,
+        traffic_limit_gb=params.traffic_limit_gb,
+        device_limit=params.device_limit,
+        connected_squads=params.squads or None,
+        tariff_id=tariff.id,
+        commit=False,
+        source_guest_purchase_id=purchase.id,
+    )
+    if (
+        subscription.user_id != locked_user.id
+        or not subscription.is_trial
+        or subscription.source_guest_purchase_id != purchase.id
+    ):
+        await db.rollback()
+        raise _error('trial_claim_exists', 'A free trial has already been claimed', 409)
+    purchase.subscription_id = subscription.id
+    await db.commit()
+    await db.refresh(purchase)
+    await _resume_free_trial(db, purchase)
+    await db.refresh(purchase)
+    return BulkaFreeTrialResult(purchase)
+
+
+async def _resume_free_trial(db: AsyncSession, purchase: GuestPurchase) -> None:
+    if purchase.status == GuestPurchaseStatus.DELIVERED.value:
+        return
+    lease_id = await _claim_free_trial_lease(db, purchase.id)
+    if lease_id is None:
+        return
+    await db.refresh(purchase)
+    if not purchase.subscription_id:
+        return
+    subscription = await db.get(Subscription, purchase.subscription_id)
+    if (
+        subscription is None
+        or subscription.user_id != purchase.buyer_user_id
+        or not subscription.is_trial
+        or subscription.source_guest_purchase_id != purchase.id
+    ):
+        return
+    service = SubscriptionService()
+    if not service.is_configured:
+        return
+    try:
+        panel_user = await service.create_remnawave_user(db, subscription)
+    except Exception:
+        logger.exception('Bulka free trial provisioning failed', purchase_id=purchase.id)
+        return
+    await db.refresh(subscription)
+    if panel_user is None or not subscription.subscription_url:
+        return
+    result = await db.execute(
+        update(GuestPurchase)
+        .where(
+            GuestPurchase.id == purchase.id,
+            GuestPurchase.activation_lease_id == lease_id,
+            GuestPurchase.status == GuestPurchaseStatus.PENDING_ACTIVATION.value,
+        )
+        .values(
+            subscription_id=subscription.id,
+            subscription_url=subscription.subscription_url,
+            subscription_crypto_link=subscription.subscription_crypto_link,
+            activated_at=datetime.now(UTC),
+            delivered_at=datetime.now(UTC),
+            status=GuestPurchaseStatus.DELIVERED.value,
+            activation_lease_id=None,
+            activation_lease_until=None,
+        )
+    )
+    await db.commit()
+    if result.rowcount != 1:
+        logger.info('Bulka free trial finalization lost lease', purchase_id=purchase.id)
+
+
+async def retry_stuck_bulka_free_trials(
+    db: AsyncSession, *, stale_seconds: int = _FREE_TRIAL_LEASE_SECONDS, limit: int = 10
+) -> int:
+    result = await db.execute(
+        select(GuestPurchase)
+        .where(
+            GuestPurchase.is_bulka_free_trial.is_(True),
+            GuestPurchase.status == GuestPurchaseStatus.PENDING_ACTIVATION.value,
+            (GuestPurchase.activation_lease_until.is_(None))
+            | (GuestPurchase.activation_lease_until <= datetime.now(UTC)),
+        )
+        .order_by(GuestPurchase.created_at.asc())
+        .limit(limit)
+    )
+    count = 0
+    for purchase in result.scalars().all():
+        await _resume_free_trial(db, purchase)
+        count += 1
+    return count
 
 
 async def create_bulka_purchase(
