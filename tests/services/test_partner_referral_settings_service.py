@@ -59,10 +59,32 @@ async def test_approved_partner_applies_nullable_overrides(global_settings):
     assert resolved.values.first_topup_bonus_kopeks == global_settings['REFERRAL_FIRST_TOPUP_BONUS_KOPEKS']
     assert resolved.values.inviter_bonus_kopeks == 900
     assert resolved.values.commission_percent == 40
+    assert resolved.values.first_payment_commission_percent == global_settings['REFERRAL_FIRST_PAYMENT_COMMISSION_PERCENT']
     assert resolved.values.recurring_commission_tiers == ''
     assert resolved.values.max_commission_payments == 0
     assert resolved.sources['minimum_topup_kopeks'] == 'partner'
     assert resolved.sources['first_topup_bonus_kopeks'] == 'global'
+
+
+@pytest.mark.asyncio
+async def test_approved_partner_explicit_first_payment_zero_is_preserved(global_settings):
+    row = SimpleNamespace(
+        minimum_topup_kopeks=None,
+        first_topup_bonus_kopeks=None,
+        inviter_bonus_kopeks=None,
+        commission_percent=None,
+        first_payment_commission_percent=0,
+        recurring_commission_tiers=None,
+        max_commission_payments=None,
+        max_commission_kopeks=None,
+    )
+    result = SimpleNamespace(scalar_one_or_none=lambda: row)
+    db = SimpleNamespace(execute=AsyncMock(return_value=result))
+
+    resolved = await service.resolve_legacy_referral_settings(db, _user(is_partner=True, commission=30))
+
+    assert resolved.values.commission_percent == 30
+    assert resolved.values.first_payment_commission_percent == 0
 
 
 @pytest.mark.asyncio

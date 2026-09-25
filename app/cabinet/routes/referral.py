@@ -427,6 +427,21 @@ async def get_referral_terms(
     legacy_values = (
         await resolve_legacy_referral_settings(db, user)
     ).values if user is not None else None
+    effective_commission_percent = (
+        legacy_values.commission_percent if legacy_values is not None else settings.REFERRAL_COMMISSION_PERCENT
+    )
+    configured_first_payment_percent = (
+        legacy_values.first_payment_commission_percent
+        if legacy_values is not None
+        else settings.REFERRAL_FIRST_PAYMENT_COMMISSION_PERCENT
+    )
+    # Keep the terms screen aligned with payout calculation: an unset first-payment
+    # rate uses the effective regular rate, while an explicit zero remains zero.
+    effective_first_payment_percent = (
+        configured_first_payment_percent
+        if configured_first_payment_percent is not None
+        else effective_commission_percent
+    )
     return ReferralTermsResponse(
         scheme='levels' if settings.is_referral_levels_scheme() else 'legacy',
         level_descriptions=level_descriptions,
@@ -455,12 +470,8 @@ async def get_referral_terms(
         reward_choice_money=choice_money,
         reward_choice_days=choice_days,
         is_enabled=settings.is_referral_program_enabled(),
-        commission_percent=(legacy_values.commission_percent if legacy_values else settings.REFERRAL_COMMISSION_PERCENT),
-        first_payment_commission_percent=(
-            legacy_values.first_payment_commission_percent
-            if legacy_values
-            else settings.REFERRAL_FIRST_PAYMENT_COMMISSION_PERCENT
-        ),
+        commission_percent=effective_commission_percent,
+        first_payment_commission_percent=effective_first_payment_percent,
         recurring_commission_tiers=(
             legacy_values.recurring_commission_tiers if legacy_values else settings.REFERRAL_RECURRING_COMMISSION_TIERS
         ),
