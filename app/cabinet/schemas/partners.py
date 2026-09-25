@@ -50,10 +50,57 @@ class PartnerCampaignInfo(BaseModel):
     subscription_traffic_gb: int | None = None
     deep_link: str | None = None
     web_link: str | None = None
+    # Ready-to-use web links. These are optional so older campaign payloads remain valid.
+    sale_url: str | None = None
+    trial_url: str | None = None
+    landing_url: str | None = None
     # Per-campaign statistics
     registrations_count: int = 0
     referrals_count: int = 0
     earnings_kopeks: int = 0
+
+
+class PartnerRecurringCommissionTier(BaseModel):
+    """One effective recurring commission threshold."""
+
+    payment_number: int
+    percent: int
+
+
+class PartnerReferralLevel(BaseModel):
+    """Effective level rule visible to an approved partner."""
+
+    level: int
+    is_active: bool = True
+    reward_mode: str
+    trigger: str
+    referrer_percent: int | None = None
+    referrer_fixed_kopeks: int | None = None
+    referrer_days: int = 0
+    referrer_tariff_id: int | None = None
+    referee_fixed_kopeks: int | None = None
+    referee_days: int = 0
+    referee_tariff_id: int | None = None
+    max_payments: int = 0
+    required_referrals: int = 0
+    required_referrals_active_only: bool = True
+
+
+class PartnerTerms(BaseModel):
+    """Effective referral policy for the current approved partner only."""
+
+    scheme: str
+    levels_mode: str | None = None
+    minimum_topup_kopeks: int | None = None
+    first_topup_bonus_kopeks: int | None = None
+    inviter_bonus_kopeks: int | None = None
+    commission_percent: int | None = None
+    first_payment_commission_percent: int | None = None
+    recurring_commission_tiers: list[PartnerRecurringCommissionTier] = Field(default_factory=list)
+    max_commission_payments: int | None = None
+    max_commission_kopeks: int | None = None
+    levels: list[PartnerReferralLevel] = Field(default_factory=list)
+    description: str | None = None
 
 
 class PartnerStatusResponse(BaseModel):
@@ -61,8 +108,9 @@ class PartnerStatusResponse(BaseModel):
 
     partner_status: str
     commission_percent: int | None = None
+    partner_terms: PartnerTerms | None = None
     latest_application: PartnerApplicationInfo | None = None
-    campaigns: list[PartnerCampaignInfo] = []
+    campaigns: list[PartnerCampaignInfo] = Field(default_factory=list)
 
 
 # ==================== Campaign detailed stats ====================

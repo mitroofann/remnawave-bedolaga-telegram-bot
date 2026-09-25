@@ -1,6 +1,39 @@
 """Shared utility for generating campaign deep links and web links."""
 
+from urllib.parse import quote
+
 from app.config import settings
+
+
+_PARTNER_SALE_BASE_URL = 'https://cabinet.bulkavpn.net/buy/now'
+_PARTNER_LANDING_BASE_URL = 'https://bulkavpn.net/'
+
+
+def _encode_campaign_parameter(start_parameter: str) -> str:
+    """Encode a raw campaign identifier once for a query string."""
+    return quote(start_parameter, safe='')
+
+
+def get_partner_campaign_sale_url(start_parameter: str | None) -> str | None:
+    """Build the fixed-domain sale URL for an approved partner campaign."""
+    if not start_parameter:
+        return None
+    return f'{_PARTNER_SALE_BASE_URL}?campaign={_encode_campaign_parameter(start_parameter)}'
+
+
+def get_partner_campaign_trial_url(start_parameter: str | None) -> str | None:
+    """Build the fixed-domain trial URL for an approved partner campaign."""
+    if not start_parameter:
+        return None
+    encoded = _encode_campaign_parameter(start_parameter)
+    return f'{_PARTNER_SALE_BASE_URL}?campaign={encoded}&intent=trial'
+
+
+def get_partner_campaign_landing_url(start_parameter: str | None) -> str | None:
+    """Build the fixed-domain public landing URL for an approved partner campaign."""
+    if not start_parameter:
+        return None
+    return f'{_PARTNER_LANDING_BASE_URL}?campaign={_encode_campaign_parameter(start_parameter)}'
 
 
 def get_campaign_deep_link(start_parameter: str) -> str:

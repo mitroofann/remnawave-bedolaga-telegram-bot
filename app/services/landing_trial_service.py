@@ -245,6 +245,7 @@ async def claim_free_trial(
     contact_type: Literal['email', 'telegram'],
     contact_value: str,
     language: str | None = None,
+    campaign_slug: str | None = None,
 ) -> FreeTrialResult:
     """Синхронно выдать БЕСПЛАТНЫЙ триал через лендинг-воронку.
 
@@ -294,6 +295,14 @@ async def claim_free_trial(
     await db.commit()
     await db.refresh(subscription)
 
+    if campaign_slug:
+        try:
+            from app.services.campaign_service import AdvertisingCampaignService
+
+            await AdvertisingCampaignService().attribute_campaign(db, user, campaign_slug)
+        except Exception:
+            logger.exception('Failed to attribute campaign for landing free trial', user_id=user.id)
+
     logger.info(
         'Landing free trial claimed',
         landing_slug=landing.slug,
@@ -324,6 +333,7 @@ async def start_paid_trial(
     return_url: str,
     subid: str | None = None,
     referrer: str | None = None,
+    campaign_slug: str | None = None,
 ) -> tuple[str, str]:
     """Начать ПЛАТНЫЙ триал через существующий guest-purchase платёжный флоу.
 
@@ -356,6 +366,7 @@ async def start_paid_trial(
         payment_method=payment_method,
         subid=subid,
         referrer=referrer,
+        campaign_slug=campaign_slug,
         commit=False,
     )
     purchase.is_trial = True

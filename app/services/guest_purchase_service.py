@@ -487,6 +487,7 @@ async def fulfill_purchase(
             if purchase.cabinet_password and recipient_type == 'email' and is_new_account:
                 purchase.auto_login_token = create_auto_login_token(user.id)
                 await db.commit()
+            await _attribute_purchase_campaign(db, purchase, user)
             logger.info(
                 'Guest paid trial fulfilled',
                 purchase_id=purchase.id,
