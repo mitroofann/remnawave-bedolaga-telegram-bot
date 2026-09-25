@@ -5,7 +5,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.cabinet.utils.links import get_campaign_deep_link, get_campaign_web_link
+from app.cabinet.utils.links import (
+    get_campaign_deep_link,
+    get_campaign_web_link,
+    get_partner_campaign_landing_url,
+    get_partner_campaign_sale_url,
+    get_partner_campaign_trial_url,
+)
 from app.config import settings
 from app.database.models import AdvertisingCampaign, User
 from app.services.partner_application_service import partner_application_service
@@ -20,7 +26,10 @@ from ..schemas.partners import (
     PartnerApplicationRequest,
     PartnerCampaignDetailedStats,
     PartnerCampaignInfo,
+    PartnerRecurringCommissionTier,
+    PartnerReferralLevel,
     PartnerStatusResponse,
+    PartnerTerms,
     PeriodChange,
     PeriodComparison,
     PeriodStats,
@@ -58,8 +67,71 @@ async def get_partner_status(
         )
 
     commission = None
+    partner_terms = None
     if user.is_partner:
-        commission = (await resolve_legacy_referral_settings(db, user)).values.commission_percent
+        resolved = await resolve_legacy_referral_settings(db, user)
+        values = resolved.values
+        commission = values.commission_percent
+
+        from app.services.referral_service import _parse_recurring_commission_tiers
+
+        recurring_tiers = [
+            PartnerRecurringCommissionTier(payment_number=threshold, percent=percent)
+            for threshold, percent in _parse_recurring_commission_tiers(
+                values.recurring_commission_tiers,
+                fallback_percent=values.commission_percent,
+            )
+        ]
+        levels: list[PartnerReferralLevel] = []
+        levels_mode = None
+        if settings.is_referral_levels_scheme():
+            from app.services.referral_reward_service import (
+                ReferralRewardLevelService,
+                _resolve_percent,
+            )
+
+            levels_mode = settings.get_referral_levels_mode()
+            configs = await ReferralRewardLevelService.get_all(db)
+            max_level = settings.get_referral_effective_max_level()
+            levels = [
+                PartnerReferralLevel(
+                    level=config.level,
+                    is_active=config.is_active,
+                    reward_mode=config.reward_mode,
+                    trigger=config.trigger,
+                    referrer_percent=(
+                        _resolve_percent(config, user, direct=True)
+                        if config.money_enabled
+                        and (levels_mode == 'tiers' or config.level == 1)
+                        else config.referrer_percent
+                    ),
+                    referrer_fixed_kopeks=config.referrer_fixed_kopeks,
+                    referrer_days=config.referrer_days,
+                    referrer_tariff_id=config.referrer_tariff_id,
+                    referee_fixed_kopeks=config.referee_fixed_kopeks,
+                    referee_days=config.referee_days,
+                    referee_tariff_id=config.referee_tariff_id,
+                    max_payments=config.max_payments,
+                    required_referrals=config.required_referrals,
+                    required_referrals_active_only=config.required_referrals_active_only,
+                )
+                for config in sorted(configs.values(), key=lambda item: item.level)
+                if config.level <= max_level
+            ]
+
+        partner_terms = PartnerTerms(
+            scheme='levels' if settings.is_referral_levels_scheme() else 'legacy',
+            levels_mode=levels_mode,
+            minimum_topup_kopeks=values.minimum_topup_kopeks,
+            first_topup_bonus_kopeks=values.first_topup_bonus_kopeks,
+            inviter_bonus_kopeks=values.inviter_bonus_kopeks,
+            commission_percent=values.commission_percent,
+            first_payment_commission_percent=values.first_payment_commission_percent,
+            recurring_commission_tiers=recurring_tiers,
+            max_commission_payments=values.max_commission_payments,
+            max_commission_kopeks=values.max_commission_kopeks,
+            levels=levels,
+        )
 
     # Fetch campaigns assigned to this partner
     campaigns: list[PartnerCampaignInfo] = []
@@ -89,6 +161,9 @@ async def get_partner_status(
                     subscription_traffic_gb=c.subscription_traffic_gb,
                     deep_link=get_campaign_deep_link(c.start_parameter),
                     web_link=get_campaign_web_link(c.start_parameter),
+                    sale_url=get_partner_campaign_sale_url(c.start_parameter),
+                    trial_url=get_partner_campaign_trial_url(c.start_parameter),
+                    landing_url=get_partner_campaign_landing_url(c.start_parameter),
                     registrations_count=stats.get('registrations_count', 0),
                     referrals_count=stats.get('referrals_count', 0),
                     earnings_kopeks=stats.get('earnings_kopeks', 0),
@@ -98,6 +173,7 @@ async def get_partner_status(
     return PartnerStatusResponse(
         partner_status=user.partner_status,
         commission_percent=commission,
+        partner_terms=partner_terms,
         latest_application=app_info,
         campaigns=campaigns,
     )

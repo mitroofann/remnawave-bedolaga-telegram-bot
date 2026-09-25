@@ -33,6 +33,7 @@ router = APIRouter(prefix='/landing', tags=['Landing Trial'])
 # Валидация контакта — те же правила, что в purchase-флоу (landing.py).
 _EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 _TELEGRAM_RE = re.compile(r'^@?[A-Za-z0-9_]{4,32}$')
+_CAMPAIGN_SLUG_RE = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
 
 
 # ============ Schemas ============
@@ -48,6 +49,13 @@ class LandingTrialRequest(BaseModel):
     yclid: str | None = Field(default=None, max_length=64, pattern=r'^[0-9]{1,64}$')
     referrer: str | None = Field(default=None, max_length=500)
     subid: str | None = Field(default=None, max_length=255)
+    campaign_slug: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode='after')
+    def validate_campaign_slug(self) -> 'LandingTrialRequest':
+        if self.campaign_slug is not None and not _CAMPAIGN_SLUG_RE.fullmatch(self.campaign_slug):
+            raise ValueError('Invalid campaign slug')
+        return self
 
     @model_validator(mode='after')
     def validate_contact(self) -> 'LandingTrialRequest':
@@ -135,6 +143,7 @@ async def create_landing_trial(
                 return_url=token_placeholder_return,
                 subid=body.subid,
                 referrer=body.referrer,
+                campaign_slug=body.campaign_slug,
             )
 
             # Кэшируем Yandex CID/yclid/subid по токену — как в purchase-флоу,
@@ -150,6 +159,7 @@ async def create_landing_trial(
             contact_type=body.contact_type,  # type: ignore[arg-type]
             contact_value=contact_value,
             language=body.language,
+            campaign_slug=body.campaign_slug,
         )
         return LandingTrialResponse(
             mode='free',
