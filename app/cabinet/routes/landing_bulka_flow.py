@@ -60,6 +60,7 @@ class BulkaFreeTrialRequest(BaseModel):
     language: str | None = Field(default=None, max_length=5)
     referrer: str | None = Field(default=None, max_length=500)
     subid: str | None = Field(default=None, max_length=255)
+    campaign_slug: str | None = Field(default=None, max_length=64, pattern=r'^[A-Za-z0-9_-]{1,64}$')
 
 
 class BulkaFreeTrialResponse(BaseModel):
@@ -114,6 +115,7 @@ async def create_bulka_flow_free_trial(
             language=body.language,
             referrer=body.referrer,
             subid=body.subid,
+            campaign_slug=body.campaign_slug,
         )
     except GuestPurchaseError as exc:
         _raise(exc)

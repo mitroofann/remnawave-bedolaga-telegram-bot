@@ -285,6 +285,7 @@ async def create_bulka_free_trial(
     language: str | None = None,
     referrer: str | None = None,
     subid: str | None = None,
+    campaign_slug: str | None = None,
 ) -> BulkaFreeTrialResult:
     """Reserve and provision one authenticated, zero-price Bulka trial.
 
@@ -298,6 +299,7 @@ async def create_bulka_free_trial(
         'language': language,
         'referrer': referrer,
         'subid': subid,
+        'campaign_slug': campaign_slug,
     }
     fingerprint = _payload_hash(request_payload)
 
@@ -353,6 +355,7 @@ async def create_bulka_free_trial(
             is_trial=True,
             is_bulka_free_trial=True,
             activation_kind=_FREE_TRIAL_ACTIVATION_KIND,
+            campaign_slug=campaign_slug,
             subid=subid,
             referrer=referrer,
         )
