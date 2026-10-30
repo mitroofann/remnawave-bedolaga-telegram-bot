@@ -480,6 +480,7 @@ async def create_bulka_purchase(
     yandex_cid: str | None,
     referrer: str | None,
     subid: str | None,
+    campaign_slug: str | None,
 ) -> BulkaPurchaseResult:
     _assert_bulka_landing(landing)
     request_payload = {
@@ -492,6 +493,7 @@ async def create_bulka_purchase(
         'yandex_cid': yandex_cid,
         'referrer': referrer,
         'subid': subid,
+        'campaign_slug': campaign_slug,
     }
     fingerprint = _payload_hash(request_payload)
     existing = await get_bulka_purchase_by_idempotency_key(
@@ -551,6 +553,7 @@ async def create_bulka_purchase(
         status=GuestPurchaseStatus.PENDING.value,
         subid=subid,
         referrer=referrer,
+        campaign_slug=campaign_slug,
     )
     try:
         await db.commit()

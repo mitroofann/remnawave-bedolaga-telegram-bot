@@ -35,6 +35,7 @@ class BulkaPurchaseRequest(BaseModel):
     yandex_cid: str | None = Field(default=None, max_length=128, pattern=r'^[A-Za-z0-9._:-]{4,128}$')
     referrer: str | None = Field(default=None, max_length=500)
     subid: str | None = Field(default=None, max_length=255)
+    campaign_slug: str | None = Field(default=None, max_length=64, pattern=r'^[A-Za-z0-9_-]{1,64}$')
 
     @model_validator(mode='after')
     def validate_selection(self) -> 'BulkaPurchaseRequest':
@@ -150,6 +151,7 @@ async def create_bulka_flow_purchase(
             yandex_cid=body.yandex_cid,
             referrer=body.referrer,
             subid=body.subid,
+            campaign_slug=body.campaign_slug,
         )
     except GuestPurchaseError as exc:
         _raise(exc)
