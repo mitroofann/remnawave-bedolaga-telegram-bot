@@ -1,13 +1,12 @@
 """Marketing bot manager - runs standalone greeting bots in background."""
 
 import asyncio
-from typing import Dict
 
 import structlog
 from aiogram import Bot, Dispatcher, types
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command
+from aiogram.exceptions import TelegramBadRequest, TelegramUnauthorizedError
 from aiogram.types import BufferedInputFile
+from aiogram.utils.backoff import BackoffConfig
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +21,18 @@ logger = structlog.get_logger(__name__)
 # сам и шлёт её байтами; если и это не удалось — уходит хотя бы текст.
 IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 15
 MAX_IMAGE_BYTES = 10 * 1024 * 1024  # лимит Telegram для фото
+
+# Маркетинговые боты живут в одном процессе и одном логе с основным ботом, и
+# штатный ретрай aiogram (потолок паузы — 5 секунд) превращает отозванный токен
+# в поток ошибок: 401 раз в 5 секунд, 238 записей за 10 минут. Поднимаем потолок
+# паузы — ошибка остаётся видимой, но не забивает лог.
+POLLING_BACKOFF_CONFIG = BackoffConfig(min_delay=1.0, max_delay=60.0, factor=1.5, jitter=0.1)
+
+# Пауза перед перезапуском поллинга, упавшего исключением.
+POLLING_RESTART_DELAY_SECONDS = 5
+
+# Сколько ждём штатной остановки поллинга, прежде чем оборвать задачу.
+POLLING_STOP_TIMEOUT_SECONDS = 10.0
 
 
 async def _download_image(image_url: str) -> bytes | None:
@@ -85,9 +96,19 @@ class MarketingBotInstance:
 
     async def start(self):
         """Start polling for this bot."""
-        if self.task is not None:
+        # Инстанс переживает остановку и переиспользуется при смене токена
+        # и включении бота обратно, поэтому «мёртвая» задача от прошлого
+        # запуска не должна считаться работающей.
+        if self.task is not None and not self.task.done():
             logger.warning('Marketing bot already running', bot_id=self.bot_id, name=self.name)
             return
+
+        # stop() поднимает _stopping, а _run_polling крутится, пока он опущен.
+        # Без сброса флага цикл выходит на первой же итерации: в логе
+        # «Marketing bot started», а getUpdates не вызывается ни разу — бот
+        # молчит, хотя в кабинете он включён.
+        self._stopping = False
+        self.task = None
 
         try:
             self.bot = Bot(token=self.token)
@@ -154,6 +175,31 @@ class MarketingBotInstance:
                         error=str(e),
                     )
 
+            # На токене мог остаться вебхук — если этого бота раньше настраивали
+            # в режиме webhook. С ним getUpdates отвечает 409 Conflict, и поллинг
+            # крутится вхолостую, не получая ни одного апдейта. Заодно это первая
+            # проверка токена: отозванный Telegram отвергает прямо здесь.
+            try:
+                await self.bot.delete_webhook(drop_pending_updates=False)
+            except TelegramUnauthorizedError as e:
+                logger.error(
+                    'Marketing bot token rejected by Telegram, polling not started',
+                    bot_id=self.bot_id,
+                    name=self.name,
+                    error=str(e),
+                )
+                await self._release_bot()
+                return
+            except Exception as e:
+                # Например, api.telegram.org недоступен на старте — поллинг
+                # умеет ждать сеть сам, это не повод не запускаться.
+                logger.warning(
+                    'Marketing bot webhook cleanup failed',
+                    bot_id=self.bot_id,
+                    name=self.name,
+                    error=str(e),
+                )
+
             # Start polling in background task
             self.task = asyncio.create_task(self._run_polling())
             logger.info('Marketing bot started', bot_id=self.bot_id, name=self.name)
@@ -166,20 +212,71 @@ class MarketingBotInstance:
         """Run polling loop (restarts on errors)."""
         while not self._stopping:
             try:
-                await self.dp.start_polling(self.bot, allowed_updates=['message'])
+                await self.dp.start_polling(
+                    self.bot,
+                    allowed_updates=['message'],
+                    # Поллер живёт в том же event loop, что и основной бот, и
+                    # по умолчанию start_polling вешает свои обработчики
+                    # SIGINT/SIGTERM поверх graceful shutdown приложения —
+                    # каждый маркетинговый бот перетирал их своим.
+                    handle_signals=False,
+                    backoff_config=POLLING_BACKOFF_CONFIG,
+                    # Сессию закрывает stop(): с этим флагом start_polling
+                    # закрыл бы её сам на выходе из цикла.
+                    close_bot_session=False,
+                )
+            except TelegramUnauthorizedError as e:
+                # Токен отозван или перевыпущен: повторять getUpdates
+                # бессмысленно, бот будет молчать до правки конфигурации.
+                # Выходим из цикла — новый токен придёт через reload().
+                logger.error(
+                    'Marketing bot token rejected by Telegram, polling stopped until token changes',
+                    bot_id=self.bot_id,
+                    name=self.name,
+                    error=str(e),
+                )
+                return
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 if not self._stopping:
                     logger.error(
-                        'Marketing bot polling error, restarting in 5s',
+                        'Marketing bot polling error, restarting',
                         bot_id=self.bot_id,
                         name=self.name,
                         error=str(e),
+                        retry_in=POLLING_RESTART_DELAY_SECONDS,
                     )
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(POLLING_RESTART_DELAY_SECONDS)
 
     async def stop(self):
         """Stop polling for this bot."""
         self._stopping = True
+
+        # Гасим поллинг штатно: start_polling держит собственные внутренние
+        # задачи (опрос и ожидание стоп-сигнала), и отмена внешней задачи
+        # оставляет их жить. Такой «осиротевший» поллер продолжал дёргать
+        # Telegram уже отозванным токеном — 401 каждые 5 секунд, пока не
+        # перезапустишь контейнер.
+        if self.dp is not None:
+            try:
+                await asyncio.wait_for(self.dp.stop_polling(), timeout=POLLING_STOP_TIMEOUT_SECONDS)
+            except RuntimeError:
+                # Поллинг ещё не успел стартовать — отмены задачи внизу хватит.
+                pass
+            except TimeoutError:
+                logger.warning(
+                    'Marketing bot polling stop timed out, cancelling task',
+                    bot_id=self.bot_id,
+                    name=self.name,
+                )
+            except Exception as e:
+                logger.warning(
+                    'Marketing bot polling stop failed',
+                    bot_id=self.bot_id,
+                    name=self.name,
+                    error=str(e),
+                )
 
         if self.task:
             self.task.cancel()
@@ -189,12 +286,15 @@ class MarketingBotInstance:
                 pass
             self.task = None
 
+        await self._release_bot()
+        logger.info('Marketing bot stopped', bot_id=self.bot_id, name=self.name)
+
+    async def _release_bot(self):
+        """Закрывает HTTP-сессию бота. Поллинг к этому моменту уже не идёт."""
         if self.bot:
             await self.bot.session.close()
             self.bot = None
-
         self.dp = None
-        logger.info('Marketing bot stopped', bot_id=self.bot_id, name=self.name)
 
     async def reload(
         self,
@@ -219,6 +319,12 @@ class MarketingBotInstance:
             logger.info('Marketing bot token changed, restarting', bot_id=self.bot_id, name=self.name)
             await self.stop()
             await self.start()
+        elif self.task is None or self.task.done():
+            # Поллинг уже не идёт — например, на старте Telegram отверг токен
+            # или задача умерла. Правка любого поля в кабинете должна поднять
+            # бота заново, иначе он останется молчащим до смены токена.
+            logger.info('Marketing bot was not running, starting', bot_id=self.bot_id, name=self.name)
+            await self.start()
         else:
             logger.info('Marketing bot config updated', bot_id=self.bot_id, name=self.name)
 
@@ -227,15 +333,13 @@ class MarketingBotManager:
     """Manages all active marketing bots."""
 
     def __init__(self):
-        self.bots: Dict[int, MarketingBotInstance] = {}
+        self.bots: dict[int, MarketingBotInstance] = {}
         self._lock = asyncio.Lock()
 
     async def load_and_start_all(self, db: AsyncSession):
         """Load all active bots from database and start them."""
         async with self._lock:
-            result = await db.execute(
-                select(MarketingBot).where(MarketingBot.is_active == True)
-            )
+            result = await db.execute(select(MarketingBot).where(MarketingBot.is_active == True))
             active_bots = result.scalars().all()
 
             logger.info('Loading marketing bots', count=len(active_bots))
